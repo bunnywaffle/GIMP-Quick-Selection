@@ -6,6 +6,10 @@ Powered by the **SIGGRAPH Lazy Snapping** interactive segmentation algorithm (Li
 
 ---
 
+![GIMP Quick Selection Brush Screenshot](assets/screenshot.png)
+
+---
+
 ## ✨ Features
 
 - **Photoshop / Affinity Photo Selection Workflow**:
