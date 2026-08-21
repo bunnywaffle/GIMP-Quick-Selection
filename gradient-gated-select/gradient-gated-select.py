@@ -8,7 +8,7 @@ Interactive Quick Selection tool with 4 high-accuracy edge-snapping engines:
 2. 🎯 Adaptive Wavefront (Photoshop Edge-Gated Flood)
 3. 🌊 Geodesic Ridge (Fast Marching Gradient Distance)
 4. 🖌️ Adaptive Variance (Affinity Photo Style Gaussian Gating)
-Features real-time Zoom & Pan navigation, custom overlays, and instant application.
+Features collapsible Advanced Settings, Zoom & Pan navigation, and instant apply.
 """
 
 import sys
@@ -309,8 +309,11 @@ def apply_intelligent_lazy_snapping(
     sp_centers,
     sp_neighbors,
     num_sp,
-    smoothness_weight=22.0,
-    expansion_reach=3.5
+    smoothness_weight=25.0,
+    expansion_reach=2.0,
+    color_tolerance=22.0,
+    hard_bg_cutoff=28.0,
+    contrast_scale=6.0
 ):
     if not fg_brush_nodes:
         return active_selection
@@ -320,10 +323,10 @@ def apply_intelligent_lazy_snapping(
     min_by = min(sp_centers[b][4] for b in fg_brush_nodes)
     max_by = max(sp_centers[b][4] for b in fg_brush_nodes)
 
-    stroke_span = max(35.0, math.hypot(max_bx - min_bx, max_by - min_by))
-    search_radius = max(80.0, stroke_span * expansion_reach)
+    stroke_span = max(25.0, math.hypot(max_bx - min_bx, max_by - min_by))
+    search_radius = max(50.0, stroke_span * expansion_reach)
     sq_search_r = search_radius * search_radius
-    sq_outer_anchor = (search_radius * 0.90) ** 2
+    sq_outer_anchor = (search_radius * 0.85) ** 2
 
     fg_l = sum(sp_centers[b][0] for b in fg_brush_nodes) / len(fg_brush_nodes)
     fg_a = sum(sp_centers[b][1] for b in fg_brush_nodes) / len(fg_brush_nodes)
@@ -339,7 +342,7 @@ def apply_intelligent_lazy_snapping(
             candidate_nodes.add(sp_id)
             l, a, b = sp_centers[sp_id][0], sp_centers[sp_id][1], sp_centers[sp_id][2]
             d_fg_col = math.sqrt((l - fg_l)**2 + (a - fg_a)**2 + (b - fg_b)**2)
-            if min_d2 >= sq_outer_anchor or d_fg_col > 45.0:
+            if min_d2 >= sq_outer_anchor or d_fg_col >= hard_bg_cutoff:
                 hard_bg_nodes.add(sp_id)
 
     if not candidate_nodes:
@@ -370,6 +373,11 @@ def apply_intelligent_lazy_snapping(
             eps = 0.001
             e_fg = d_fg / (d_fg + d_bg + eps)
             e_bg = d_bg / (d_fg + d_bg + eps)
+
+            if d_fg > color_tolerance:
+                e_fg = min(1.0, e_fg * 2.5)
+                e_bg = max(0.0, e_bg * 0.4)
+
             mf.add_tlinks(local_id, (1.0 - e_fg) * 35.0, (1.0 - e_bg) * 35.0)
 
     for u_global, u_local in node_to_local.items():
@@ -379,7 +387,7 @@ def apply_intelligent_lazy_snapping(
                 v_local = node_to_local[v_global]
                 vl, va, vb = sp_centers[v_global][0], sp_centers[v_global][1], sp_centers[v_global][2]
                 color_dist = math.sqrt((ul-vl)**2 + (ua-va)**2 + (ub-vb)**2)
-                w_smooth = smoothness_weight / (1.0 + (color_dist / 8.0)**2)
+                w_smooth = smoothness_weight / (1.0 + (color_dist / max(1.0, contrast_scale))**2)
                 mf.add_nlink(u_local, v_local, w_smooth)
 
     fg_local_set = mf.compute_min_cut()
@@ -638,7 +646,7 @@ def apply_variance_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
 class QuickSelectionDialog(Gtk.Dialog):
     def __init__(self, image, drawable):
         super().__init__(title=_("Quick Selection Brush Suite (Edge-Aware)"), modal=True)
-        self.set_default_size(1100, 780)
+        self.set_default_size(1120, 800)
 
         self.image = image
         self.drawable = drawable
@@ -665,13 +673,18 @@ class QuickSelectionDialog(Gtk.Dialog):
         self.cursor_screen_y = -100
         self.current_stroke_seeds = set()
 
-        # Parameters
-        self.brush_size = 22
-        self.snap_reach = 3.5
-        self.color_tolerance = 25.0
+        # Primary Parameters (Balanced and Controlled)
+        self.brush_size = 20
+        self.snap_reach = 2.0
+        self.color_tolerance = 22.0
         self.edge_barrier = 35
-        self.smoothness_weight = 22.0
         self.selection_mode = "add"  # "add", "subtract", "replace"
+
+        # Advanced Fine-Tuning Parameters
+        self.hard_bg_cutoff = 28.0
+        self.smoothness_weight = 25.0
+        self.contrast_scale = 6.0
+        self.slic_compactness = 16.0
 
         # Selection Overlay Color (Default Cyan 50% opacity)
         self.overlay_r = 0.0
@@ -742,7 +755,7 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         # 4. Fine SLIC Superpixels Preprocessing for Lazy Snapping (~1500 nodes)
         self.sp_labels, self.sp_centers, self.sp_pixels, self.sp_neighbors = compute_slic(
-            self.thumb_lab, self.prev_w, self.prev_h, num_superpixels=1500, compactness=16.0, num_iters=3
+            self.thumb_lab, self.prev_w, self.prev_h, num_superpixels=1500, compactness=self.slic_compactness, num_iters=3
         )
         self.num_sp = len(self.sp_centers)
 
@@ -900,7 +913,7 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         # Footer hints
         footer_box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 8)
-        self.foot_hint = Gtk.Label.new(_("⚡ Lazy Snapping Active: Superpixel Graph Cut energy minimization (Default)."))
+        self.foot_hint = Gtk.Label.new(_("⚡ Lazy Snapping Active: Graph Cut energy minimization (Default)."))
         self.foot_hint.set_alignment(0.0, 0.5)
         footer_box.pack_start(self.foot_hint, True, True, 0)
 
@@ -911,10 +924,14 @@ class QuickSelectionDialog(Gtk.Dialog):
         footer_box.pack_end(self.info_label, False, False, 0)
         left_box.pack_end(footer_box, False, False, 0)
 
-        # RIGHT CONTROLS
+        # RIGHT CONTROLS (with ScrolledWindow to ensure clean fit)
+        scrolled_right = Gtk.ScrolledWindow.new(None, None)
+        scrolled_right.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled_right.set_size_request(360, -1)
+        main_box.pack_start(scrolled_right, False, False, 0)
+
         right_box = Gtk.Box.new(Gtk.Orientation.VERTICAL, 10)
-        right_box.set_size_request(340, -1)
-        main_box.pack_start(right_box, False, False, 0)
+        scrolled_right.add(right_box)
 
         # ====================================================================
         # 1. ALGORITHM ENGINE SELECTOR FRAME
@@ -942,7 +959,99 @@ class QuickSelectionDialog(Gtk.Dialog):
         algo_box.pack_start(self.lbl_algo_desc, False, False, 0)
 
         # ====================================================================
-        # 2. SELECTION PREVIEW OVERLAY FRAME
+        # 2. TUNING CONTROLS FRAME
+        # ====================================================================
+        tune_frame = Gtk.Frame.new(_("Snapping & Sensitivity Controls"))
+        right_box.pack_start(tune_frame, False, False, 0)
+        tune_box = Gtk.Box.new(Gtk.Orientation.VERTICAL, 6)
+        tune_box.set_border_width(8)
+        tune_frame.add(tune_box)
+
+        # Snapping Reach Slider
+        tune_box.pack_start(Gtk.Label.new(_("Snapping Reach (Expansion Multiplier):")), False, False, 0)
+        self.scale_reach = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1.0, 4.0, 0.1)
+        self.scale_reach.set_value(self.snap_reach)
+        self.scale_reach.set_value_pos(Gtk.PositionType.RIGHT)
+        self.scale_reach.set_tooltip_text(_("Controls how far beyond the brush stroke the selection expands"))
+        self.scale_reach.connect("value-changed", self._on_reach_changed)
+        tune_box.pack_start(self.scale_reach, False, False, 0)
+
+        # Color Tolerance Slider
+        self.lbl_tol = Gtk.Label.new(_("Color Tolerance (ΔE):"))
+        tune_box.pack_start(self.lbl_tol, False, False, 0)
+        self.scale_color = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 5.0, 50.0, 1.0)
+        self.scale_color.set_value(self.color_tolerance)
+        self.scale_color.set_value_pos(Gtk.PositionType.RIGHT)
+        self.scale_color.connect("value-changed", self._on_tolerance_changed)
+        tune_box.pack_start(self.scale_color, False, False, 0)
+
+        # Edge Barrier Strictness Slider
+        self.lbl_barrier = Gtk.Label.new(_("Edge Barrier Strictness:"))
+        tune_box.pack_start(self.lbl_barrier, False, False, 0)
+        self.scale_barrier = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 10.0, 80.0, 1.0)
+        self.scale_barrier.set_value(self.edge_barrier)
+        self.scale_barrier.set_value_pos(Gtk.PositionType.RIGHT)
+        self.scale_barrier.connect("value-changed", self._on_barrier_changed)
+        tune_box.pack_start(self.scale_barrier, False, False, 0)
+
+        # Quick Presets
+        preset_box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 6)
+        tune_box.pack_start(preset_box, False, False, 4)
+        btn_p1 = Gtk.Button.new_with_label(_("Precise"))
+        btn_p1.set_tooltip_text(_("Tight reach and strict edge barrier for fine detail"))
+        btn_p1.connect("clicked", lambda b: self._apply_preset(1.3, 16.0, 25))
+        preset_box.pack_start(btn_p1, True, True, 0)
+
+        btn_p2 = Gtk.Button.new_with_label(_("Balanced"))
+        btn_p2.set_tooltip_text(_("Standard balanced edge-aware snapping"))
+        btn_p2.connect("clicked", lambda b: self._apply_preset(2.0, 22.0, 35))
+        preset_box.pack_start(btn_p2, True, True, 0)
+
+        btn_p3 = Gtk.Button.new_with_label(_("Broad"))
+        btn_p3.set_tooltip_text(_("Wide reach for quickly filling larger areas"))
+        btn_p3.connect("clicked", lambda b: self._apply_preset(3.0, 32.0, 50))
+        preset_box.pack_start(btn_p3, True, True, 0)
+
+        # ====================================================================
+        # 3. COLLAPSIBLE ADVANCED PARAMETERS EXPANDER
+        # ====================================================================
+        self.adv_expander = Gtk.Expander.new(_("🔧 Advanced Parameters & Fine Tuning"))
+        self.adv_expander.set_expanded(False)  # Collapsed by default as requested!
+        right_box.pack_start(self.adv_expander, False, False, 0)
+
+        adv_box = Gtk.Box.new(Gtk.Orientation.VERTICAL, 6)
+        adv_box.set_border_width(8)
+        self.adv_expander.add(adv_box)
+
+        # Hard Background Cutoff Distance
+        adv_box.pack_start(Gtk.Label.new(_("Hard Background Color Cutoff (ΔE):")), False, False, 0)
+        self.scale_hard_cutoff = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 15.0, 50.0, 1.0)
+        self.scale_hard_cutoff.set_value(self.hard_bg_cutoff)
+        self.scale_hard_cutoff.set_value_pos(Gtk.PositionType.RIGHT)
+        self.scale_hard_cutoff.set_tooltip_text(_("Threshold at which differing colors are strictly prevented from selection"))
+        self.scale_hard_cutoff.connect("value-changed", self._on_hard_cutoff_changed)
+        adv_box.pack_start(self.scale_hard_cutoff, False, False, 0)
+
+        # Graph Cut Smoothness Prior
+        adv_box.pack_start(Gtk.Label.new(_("Graph Cut Edge Smoothness Prior (λ):")), False, False, 0)
+        self.scale_smoothness = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 5.0, 60.0, 1.0)
+        self.scale_smoothness.set_value(self.smoothness_weight)
+        self.scale_smoothness.set_value_pos(Gtk.PositionType.RIGHT)
+        self.scale_smoothness.set_tooltip_text(_("Higher values create cleaner, tighter object silhouettes"))
+        self.scale_smoothness.connect("value-changed", self._on_smoothness_changed)
+        adv_box.pack_start(self.scale_smoothness, False, False, 0)
+
+        # Boundary Contrast Scale
+        adv_box.pack_start(Gtk.Label.new(_("Boundary Contrast Sensitivity (σ):")), False, False, 0)
+        self.scale_contrast = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 2.0, 16.0, 0.5)
+        self.scale_contrast.set_value(self.contrast_scale)
+        self.scale_contrast.set_value_pos(Gtk.PositionType.RIGHT)
+        self.scale_contrast.set_tooltip_text(_("Controls contrast transition sharpness required to form a cut edge"))
+        self.scale_contrast.connect("value-changed", self._on_contrast_scale_changed)
+        adv_box.pack_start(self.scale_contrast, False, False, 0)
+
+        # ====================================================================
+        # 4. SELECTION PREVIEW OVERLAY FRAME
         # ====================================================================
         color_frame = Gtk.Frame.new(_("Selection Preview Overlay"))
         right_box.pack_start(color_frame, False, False, 0)
@@ -976,7 +1085,7 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         swatch_row2 = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 6)
         color_box.pack_start(swatch_row2, False, False, 0)
-        btn_yellow = Gtk.Button.new_with_label("🟡 Amber / Yellow")
+        btn_yellow = Gtk.Button.new_with_label("🟡 Amber")
         btn_yellow.connect("clicked", lambda b: self._set_overlay_rgb(1.0, 0.85, 0.0))
         swatch_row2.pack_start(btn_yellow, True, True, 0)
 
@@ -992,60 +1101,6 @@ class QuickSelectionDialog(Gtk.Dialog):
         self.scale_opacity.connect("value-changed", self._on_opacity_changed)
         color_box.pack_start(self.scale_opacity, False, False, 0)
 
-        # ====================================================================
-        # 3. TUNING CONTROLS FRAME
-        # ====================================================================
-        tune_frame = Gtk.Frame.new(_("Snapping & Sensitivity Controls"))
-        right_box.pack_start(tune_frame, False, False, 0)
-        tune_box = Gtk.Box.new(Gtk.Orientation.VERTICAL, 6)
-        tune_box.set_border_width(8)
-        tune_frame.add(tune_box)
-
-        # Snapping Reach Slider
-        tune_box.pack_start(Gtk.Label.new(_("Snapping Reach (Expansion Multiplier):")), False, False, 0)
-        self.scale_reach = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1.0, 5.0, 0.1)
-        self.scale_reach.set_value(self.snap_reach)
-        self.scale_reach.set_value_pos(Gtk.PositionType.RIGHT)
-        self.scale_reach.set_tooltip_text(_("Controls how far beyond the brush stroke the selection expands"))
-        self.scale_reach.connect("value-changed", self._on_reach_changed)
-        tune_box.pack_start(self.scale_reach, False, False, 0)
-
-        # Color Tolerance Slider
-        self.lbl_tol = Gtk.Label.new(_("Color Tolerance (ΔE):"))
-        tune_box.pack_start(self.lbl_tol, False, False, 0)
-        self.scale_color = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 5.0, 60.0, 1.0)
-        self.scale_color.set_value(self.color_tolerance)
-        self.scale_color.set_value_pos(Gtk.PositionType.RIGHT)
-        self.scale_color.connect("value-changed", self._on_tolerance_changed)
-        tune_box.pack_start(self.scale_color, False, False, 0)
-
-        # Edge Barrier Strictness Slider
-        self.lbl_barrier = Gtk.Label.new(_("Edge Barrier Strictness:"))
-        tune_box.pack_start(self.lbl_barrier, False, False, 0)
-        self.scale_barrier = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 10.0, 80.0, 1.0)
-        self.scale_barrier.set_value(self.edge_barrier)
-        self.scale_barrier.set_value_pos(Gtk.PositionType.RIGHT)
-        self.scale_barrier.connect("value-changed", self._on_barrier_changed)
-        tune_box.pack_start(self.scale_barrier, False, False, 0)
-
-        # Quick Presets
-        preset_box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 6)
-        tune_box.pack_start(preset_box, False, False, 4)
-        btn_p1 = Gtk.Button.new_with_label(_("Precise"))
-        btn_p1.set_tooltip_text(_("Tight reach and strict edge barrier for fine detail"))
-        btn_p1.connect("clicked", lambda b: self._apply_preset(2.0, 18.0, 25))
-        preset_box.pack_start(btn_p1, True, True, 0)
-
-        btn_p2 = Gtk.Button.new_with_label(_("Balanced"))
-        btn_p2.set_tooltip_text(_("Standard balanced edge-aware snapping"))
-        btn_p2.connect("clicked", lambda b: self._apply_preset(3.5, 25.0, 35))
-        preset_box.pack_start(btn_p2, True, True, 0)
-
-        btn_p3 = Gtk.Button.new_with_label(_("Broad"))
-        btn_p3.set_tooltip_text(_("Wide reach for quickly filling larger areas"))
-        btn_p3.connect("clicked", lambda b: self._apply_preset(4.8, 38.0, 50))
-        preset_box.pack_start(btn_p3, True, True, 0)
-
         # Status & Pixel Count
         self.status_label = Gtk.Label.new(_("Ready to paint selection."))
         self.status_label.set_alignment(0.0, 0.5)
@@ -1054,7 +1109,7 @@ class QuickSelectionDialog(Gtk.Dialog):
         self.show_all()
 
     # ========================================================================
-    # Algorithm Suite Switching
+    # Algorithm Suite Switching & Advanced Tuning Handlers
     # ========================================================================
 
     def _on_algorithm_changed(self, combo):
@@ -1065,17 +1120,17 @@ class QuickSelectionDialog(Gtk.Dialog):
                 _("⚡ Best for complex photo textures, general objects, and natural images via global graph cut.")
             )
             self.foot_hint.set_text(_("⚡ Lazy Snapping Active: Superpixel Graph Cut energy minimization (Default)."))
-            self.scale_reach.set_value(3.5)
-            self.scale_color.set_value(25.0)
-            self.scale_barrier.set_value(22.0)
+            self.scale_reach.set_value(2.0)
+            self.scale_color.set_value(22.0)
+            self.scale_barrier.set_value(35.0)
 
         elif self.active_algorithm == "wavefront":
             self.lbl_algo_desc.set_text(
                 _("🎯 Best for fine details, hair strands, and sharp contours. Launches a Photoshop-style edge-gated flood.")
             )
             self.foot_hint.set_text(_("🎯 Adaptive Wavefront Active: Photoshop-style edge-gated flood."))
-            self.scale_reach.set_value(3.5)
-            self.scale_color.set_value(25.0)
+            self.scale_reach.set_value(2.5)
+            self.scale_color.set_value(22.0)
             self.scale_barrier.set_value(35.0)
 
         elif self.active_algorithm == "geodesic":
@@ -1083,7 +1138,7 @@ class QuickSelectionDialog(Gtk.Dialog):
                 _("🌊 Best for high-contrast boundaries and solid silhouettes. Fast Marching gradient distance.")
             )
             self.foot_hint.set_text(_("🌊 Geodesic Ridge Active: Fast Marching gradient distance halting at edge ridges."))
-            self.scale_reach.set_value(3.5)
+            self.scale_reach.set_value(2.5)
             self.scale_barrier.set_value(35.0)
 
         elif self.active_algorithm == "variance":
@@ -1091,8 +1146,17 @@ class QuickSelectionDialog(Gtk.Dialog):
                 _("🖌️ Best for smooth gradient shading and controlled touchups (Affinity Photo Style).")
             )
             self.foot_hint.set_text(_("🖌️ Adaptive Variance Active: Gaussian color gating with edge boundary walls."))
-            self.scale_reach.set_value(3.5)
-            self.scale_color.set_value(25.0)
+            self.scale_reach.set_value(2.0)
+            self.scale_color.set_value(20.0)
+
+    def _on_hard_cutoff_changed(self, scale):
+        self.hard_bg_cutoff = scale.get_value()
+
+    def _on_smoothness_changed(self, scale):
+        self.smoothness_weight = scale.get_value()
+
+    def _on_contrast_scale_changed(self, scale):
+        self.contrast_scale = scale.get_value()
 
     # ========================================================================
     # Zoom & Pan Coordinate Transformation
@@ -1273,7 +1337,6 @@ class QuickSelectionDialog(Gtk.Dialog):
 
     def _on_barrier_changed(self, scale):
         self.edge_barrier = int(scale.get_value())
-        self.smoothness_weight = float(scale.get_value())
 
     def _on_canvas_press(self, widget, event):
         self.event_box.grab_focus()
@@ -1380,7 +1443,10 @@ class QuickSelectionDialog(Gtk.Dialog):
                         self.sp_neighbors,
                         self.num_sp,
                         smoothness_weight=self.smoothness_weight,
-                        expansion_reach=self.snap_reach
+                        expansion_reach=self.snap_reach,
+                        color_tolerance=self.color_tolerance,
+                        hard_bg_cutoff=self.hard_bg_cutoff,
+                        contrast_scale=self.contrast_scale
                     )
 
                 self.thumb_mask = bytearray(self.prev_w * self.prev_h)
@@ -1595,7 +1661,7 @@ class GradientGatedSelectPlugin(Gimp.PlugIn):
         )
         procedure.set_documentation(
             _("Quick Selection Brush Suite (Edge-Aware)"),
-            _("Multi-algorithm edge-aware quick selection brush featuring Lazy Snapping (Default), Adaptive Wavefront, Geodesic Ridge, and Adaptive Variance engines with Zoom & Pan navigation."),
+            _("Multi-algorithm edge-aware quick selection brush featuring Lazy Snapping (Default), Adaptive Wavefront, Geodesic Ridge, and Adaptive Variance engines with Collapsible Advanced Settings and Zoom & Pan navigation."),
             name,
         )
         procedure.set_menu_label(_("Quick Selection Brush (Edge-Aware)..."))
