@@ -4,8 +4,8 @@
 Multi-Algorithm Quick Selection Brush Suite for GIMP 3
 ======================================================
 Interactive Quick Selection tool with 4 switchable segmentation engines:
-1. ⚡ Lazy Snapping (Graph Cut + Superpixels) - Best for general objects & textures
-2. 🎯 Adaptive Wavefront (Pixel-Level / Photoshop) - Best for line art, hair & sharp edges
+1. 🎯 Adaptive Wavefront (Pixel-Level / Photoshop) - Best for line art, hair & sharp edges
+2. ⚡ Lazy Snapping (Graph Cut + Superpixels) - Best for general objects & textures
 3. 🌊 Geodesic Ridge (Gradient Distance) - Best for high-contrast silhouettes
 4. 🖌️ Adaptive Variance (Affinity Photo Style) - Best for smooth gradients & shading
 Features real-time Zoom & Pan navigation, custom overlays, and instant application.
@@ -663,7 +663,7 @@ class QuickSelectionDialog(Gtk.Dialog):
         self.orig_height = drawable.get_height()
 
         # Active Algorithm Engine:
-        # "lazy_snapping" | "wavefront" | "geodesic" | "variance"
+        # "wavefront" | "lazy_snapping" | "geodesic" | "variance"
         self.active_algorithm = "wavefront"
 
         # Viewport Navigation State (Zoom & Pan)
@@ -1375,91 +1375,95 @@ class QuickSelectionDialog(Gtk.Dialog):
 
     def _paint_stroke_step(self, px, py):
         """Executes the active segmentation engine at (px, py)."""
-        px = max(0, min(self.prev_w - 1, px))
-        py = max(0, min(self.prev_h - 1, py))
-        is_sub = (self.selection_mode == "subtract")
+        try:
+            px = max(0, min(self.prev_w - 1, px))
+            py = max(0, min(self.prev_h - 1, py))
+            is_sub = (self.selection_mode == "subtract")
 
-        if self.active_algorithm == "wavefront":
-            bbox = apply_wavefront_brush(
-                self.thumb_mask,
-                self.thumb_lab,
-                self.thumb_grad,
-                self.prev_w,
-                self.prev_h,
-                px,
-                py,
-                brush_radius=self.brush_size,
-                tol=self.color_tolerance,
-                reach=self.snap_reach,
-                barrier=self.edge_barrier,
-                is_sub=is_sub
-            )
-            if bbox:
-                min_x, min_y, max_x, max_y = bbox
-                self._refresh_local_preview(min_x, min_y, max_x, max_y)
-
-        elif self.active_algorithm == "lazy_snapping":
-            sq_r = self.brush_size * self.brush_size
-            for sp_id in range(self.num_sp):
-                cx, cy = self.sp_centers[sp_id][3], self.sp_centers[sp_id][4]
-                if (cx - px)**2 + (cy - py)**2 <= sq_r:
-                    self.current_stroke_seeds.add(sp_id)
-
-            if is_sub:
-                for s in self.current_stroke_seeds:
-                    self.selected_superpixels.discard(s)
-            else:
-                self.selected_superpixels = apply_lazy_snapping_brush(
-                    self.selected_superpixels,
-                    self.current_stroke_seeds,
-                    self.sp_centers,
-                    self.sp_neighbors,
-                    self.num_sp,
-                    smoothness_weight=self.smoothness_weight,
-                    search_reach=self.snap_reach
+            if self.active_algorithm == "wavefront":
+                bbox = apply_wavefront_brush(
+                    self.thumb_mask,
+                    self.thumb_lab,
+                    self.thumb_grad,
+                    self.prev_w,
+                    self.prev_h,
+                    px,
+                    py,
+                    radius=self.brush_size,
+                    tol=self.color_tolerance,
+                    reach=self.snap_reach,
+                    barrier=self.edge_barrier,
+                    is_sub=is_sub
                 )
+                if bbox:
+                    min_x, min_y, max_x, max_y = bbox
+                    self._refresh_local_preview(min_x, min_y, max_x, max_y)
 
-            self.thumb_mask = bytearray(self.prev_w * self.prev_h)
-            for sp_id in self.selected_superpixels:
-                for p_idx in self.sp_pixels[sp_id]:
-                    self.thumb_mask[p_idx] = 255
-            self._refresh_full_preview()
+            elif self.active_algorithm == "lazy_snapping":
+                sq_r = self.brush_size * self.brush_size
+                for sp_id in range(self.num_sp):
+                    cx, cy = self.sp_centers[sp_id][3], self.sp_centers[sp_id][4]
+                    if (cx - px)**2 + (cy - py)**2 <= sq_r:
+                        self.current_stroke_seeds.add(sp_id)
 
-        elif self.active_algorithm == "geodesic":
-            bbox = apply_geodesic_brush(
-                self.thumb_mask,
-                self.thumb_lab,
-                self.thumb_grad,
-                self.prev_w,
-                self.prev_h,
-                px,
-                py,
-                brush_radius=self.brush_size,
-                reach=self.snap_reach,
-                barrier=self.edge_barrier,
-                is_sub=is_sub
-            )
-            if bbox:
-                min_x, min_y, max_x, max_y = bbox
-                self._refresh_local_preview(min_x, min_y, max_x, max_y)
+                if is_sub:
+                    for s in self.current_stroke_seeds:
+                        self.selected_superpixels.discard(s)
+                else:
+                    self.selected_superpixels = apply_lazy_snapping_brush(
+                        self.selected_superpixels,
+                        self.current_stroke_seeds,
+                        self.sp_centers,
+                        self.sp_neighbors,
+                        self.num_sp,
+                        smoothness_weight=self.smoothness_weight,
+                        search_reach=self.snap_reach
+                    )
 
-        elif self.active_algorithm == "variance":
-            bbox = apply_variance_brush(
-                self.thumb_mask,
-                self.thumb_lab,
-                self.thumb_grad,
-                self.prev_w,
-                self.prev_h,
-                px,
-                py,
-                brush_radius=self.brush_size,
-                reach=self.snap_reach,
-                tol=self.color_tolerance,
-                is_sub=is_sub
-            )
-            if bbox:
-                min_x, min_y, max_x, max_y = bbox
-                self._refresh_local_preview(min_x, min_y, max_x, max_y)
+                self.thumb_mask = bytearray(self.prev_w * self.prev_h)
+                for sp_id in self.selected_superpixels:
+                    for p_idx in self.sp_pixels[sp_id]:
+                        self.thumb_mask[p_idx] = 255
+                self._refresh_full_preview()
+
+            elif self.active_algorithm == "geodesic":
+                bbox = apply_geodesic_brush(
+                    self.thumb_mask,
+                    self.thumb_lab,
+                    self.thumb_grad,
+                    self.prev_w,
+                    self.prev_h,
+                    px,
+                    py,
+                    radius=self.brush_size,
+                    reach=self.snap_reach,
+                    barrier=self.edge_barrier,
+                    is_sub=is_sub
+                )
+                if bbox:
+                    min_x, min_y, max_x, max_y = bbox
+                    self._refresh_local_preview(min_x, min_y, max_x, max_y)
+
+            elif self.active_algorithm == "variance":
+                bbox = apply_variance_brush(
+                    self.thumb_mask,
+                    self.thumb_lab,
+                    self.thumb_grad,
+                    self.prev_w,
+                    self.prev_h,
+                    px,
+                    py,
+                    radius=self.brush_size,
+                    reach=self.snap_reach,
+                    tol=self.color_tolerance,
+                    is_sub=is_sub
+                )
+                if bbox:
+                    min_x, min_y, max_x, max_y = bbox
+                    self._refresh_local_preview(min_x, min_y, max_x, max_y)
+
+        except Exception:
+            traceback.print_exc()
 
     def _update_status(self):
         selected_count = sum(1 for v in self.thumb_mask if v == 255)
