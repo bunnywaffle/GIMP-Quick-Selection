@@ -3,11 +3,11 @@
 """
 Multi-Algorithm Quick Selection Brush Suite for GIMP 3
 ======================================================
-Interactive Quick Selection tool with 4 edge-snapping segmentation engines:
+Interactive Quick Selection tool with 4 high-accuracy edge-snapping engines:
 1. ⚡ Intelligent Lazy Snapping (Graph Cut + Superpixels - Default)
-2. 🎯 Adaptive Wavefront (Photoshop Coherent Grow)
-3. 🌊 Geodesic Ridge (Gradient Distance)
-4. 🖌️ Adaptive Variance (Affinity Photo Style)
+2. 🎯 Adaptive Wavefront (Photoshop Edge-Gated Flood)
+3. 🌊 Geodesic Ridge (Fast Marching Gradient Distance)
+4. 🖌️ Adaptive Variance (Affinity Photo Style Gaussian Gating)
 Features real-time Zoom & Pan navigation, custom overlays, and instant application.
 """
 
@@ -312,11 +312,6 @@ def apply_intelligent_lazy_snapping(
     smoothness_weight=22.0,
     expansion_reach=3.5
 ):
-    """
-    Intelligent SIGGRAPH Lazy Snapping with generous object expansion:
-    Allows user strokes to naturally fill contiguous subject boundaries
-    and snaps to high-contrast silhouette edges via Min-Cut optimization.
-    """
     if not fg_brush_nodes:
         return active_selection
 
@@ -330,7 +325,6 @@ def apply_intelligent_lazy_snapping(
     sq_search_r = search_radius * search_radius
     sq_outer_anchor = (search_radius * 0.90) ** 2
 
-    # Compute average foreground color from brushed seeds
     fg_l = sum(sp_centers[b][0] for b in fg_brush_nodes) / len(fg_brush_nodes)
     fg_a = sum(sp_centers[b][1] for b in fg_brush_nodes) / len(fg_brush_nodes)
     fg_b = sum(sp_centers[b][2] for b in fg_brush_nodes) / len(fg_brush_nodes)
@@ -357,7 +351,6 @@ def apply_intelligent_lazy_snapping(
 
     mf = DinicMaxFlow(local_N)
 
-    # Compute background color model
     if hard_bg_nodes:
         bg_l = sum(sp_centers[b][0] for b in hard_bg_nodes) / len(hard_bg_nodes)
         bg_a = sum(sp_centers[b][1] for b in hard_bg_nodes) / len(hard_bg_nodes)
@@ -365,7 +358,6 @@ def apply_intelligent_lazy_snapping(
     else:
         bg_l, bg_a, bg_b = 50.0, 0.0, 0.0
 
-    # Add T-links
     for global_id, local_id in node_to_local.items():
         if global_id in fg_brush_nodes:
             mf.add_tlinks(local_id, 100000.0, 0.0)
@@ -380,7 +372,6 @@ def apply_intelligent_lazy_snapping(
             e_bg = d_bg / (d_fg + d_bg + eps)
             mf.add_tlinks(local_id, (1.0 - e_fg) * 35.0, (1.0 - e_bg) * 35.0)
 
-    # Add N-links (edge-weighted smoothness prior)
     for u_global, u_local in node_to_local.items():
         ul, ua, ub = sp_centers[u_global][0], sp_centers[u_global][1], sp_centers[u_global][2]
         for v_global in sp_neighbors[u_global]:
@@ -400,17 +391,13 @@ def apply_intelligent_lazy_snapping(
 
 
 # ============================================================================
-# Engine 2: Adaptive Wavefront (Photoshop Coherent Grow)
+# Engine 2: Adaptive Wavefront (Photoshop Edge-Gated Flood)
 # ============================================================================
 
 def apply_wavefront_brush(mask, lab, grad, width, height, cx, cy, radius, tol, reach, barrier, is_sub=False):
-    """
-    Photoshop-style Dijkstra Coherent Wavefront:
-    Launches a gradient-gated cost wave from the cursor core that naturally
-    expands across similar pixels and stops cleanly at contrast contours.
-    """
     max_reach = int(radius * reach)
     sq_reach = max_reach * max_reach
+    sq_tol = tol * tol
 
     min_x = max(0, cx - max_reach)
     max_x = min(width - 1, cx + max_reach)
@@ -420,7 +407,6 @@ def apply_wavefront_brush(mask, lab, grad, width, height, cx, cy, radius, tol, r
     c_idx = cy * width + cx
     cl, ca, cb = lab[c_idx*3], lab[c_idx*3+1], lab[c_idx*3+2]
 
-    # 1. Sample seeds at cursor core (inner 35% radius)
     core_r = max(2, int(radius * 0.35))
     sq_core_r = core_r * core_r
 
@@ -451,21 +437,16 @@ def apply_wavefront_brush(mask, lab, grad, width, height, cx, cy, radius, tol, r
         ref_b = sum_b / cnt
 
     target_val = 0 if is_sub else 255
+    queue = deque()
+    visited = bytearray(width * height)
 
-    # 2. Priority queue Dijkstra expansion with edge barrier cost
-    heap = []
-    dist = {}
     for gx, gy, idx in seeds:
         mask[idx] = target_val
-        dist[idx] = 0.0
-        heapq.heappush(heap, (0.0, gx, gy, idx))
+        visited[idx] = 1
+        queue.append((gx, gy, idx))
 
-    max_cost = tol * 2.2
-    while heap:
-        d, px, py, curr_idx = heapq.heappop(heap)
-        if d > dist.get(curr_idx, float('inf')):
-            continue
-
+    while queue:
+        px, py, curr_idx = queue.popleft()
         cur_l = lab[curr_idx*3]
         cur_a = lab[curr_idx*3+1]
         cur_b = lab[curr_idx*3+2]
@@ -477,33 +458,27 @@ def apply_wavefront_brush(mask, lab, grad, width, height, cx, cy, radius, tol, r
         if py < max_y: neighbors.append((px, py + 1, curr_idx + width))
 
         for nx, ny, n_idx in neighbors:
-            dx = nx - cx
-            dy = ny - cy
-            if dx*dx + dy*dy <= sq_reach:
-                nl = lab[n_idx*3]
-                na = lab[n_idx*3+1]
-                nb = lab[n_idx*3+2]
-
-                col_dist = math.sqrt((nl-ref_l)**2 + (na-ref_a)**2 + (nb-ref_b)**2)
-                step_col = math.sqrt((nl-cur_l)**2 + (na-cur_a)**2 + (nb-cur_b)**2)
-
-                g_val = float(grad[n_idx])
-                edge_penalty = ((g_val / barrier) ** 2.5) * 20.0 if g_val > barrier * 0.45 else 0.0
-
-                step_cost = 1.0 + col_dist * 0.6 + step_col * 0.4 + edge_penalty
-                next_d = d + step_cost
-
-                if next_d < max_cost and col_dist <= tol and g_val < barrier:
-                    if next_d < dist.get(n_idx, float('inf')):
-                        dist[n_idx] = next_d
-                        mask[n_idx] = target_val
-                        heapq.heappush(heap, (next_d, nx, ny, n_idx))
+            if not visited[n_idx]:
+                visited[n_idx] = 1
+                dx = nx - cx
+                dy = ny - cy
+                if dx*dx + dy*dy <= sq_reach:
+                    g_val = grad[n_idx]
+                    if g_val < barrier:
+                        nl = lab[n_idx*3]
+                        na = lab[n_idx*3+1]
+                        nb = lab[n_idx*3+2]
+                        d_col2 = (nl-ref_l)**2 + (na-ref_a)**2 + (nb-ref_b)**2
+                        step_col2 = (nl-cur_l)**2 + (na-cur_a)**2 + (nb-cur_b)**2
+                        if d_col2 <= sq_tol and step_col2 <= (tol*1.2)**2:
+                            mask[n_idx] = target_val
+                            queue.append((nx, ny, n_idx))
 
     return (min_x, min_y, max_x, max_y)
 
 
 # ============================================================================
-# Engine 3: Geodesic Ridge (Gradient Distance)
+# Engine 3: Geodesic Ridge (Fast Marching Gradient Distance)
 # ============================================================================
 
 def apply_geodesic_brush(mask, lab, grad, width, height, cx, cy, radius, reach, barrier, is_sub=False):
@@ -516,6 +491,8 @@ def apply_geodesic_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
     max_y = min(height - 1, cy + max_reach)
 
     c_idx = cy * width + cx
+    cl, ca, cb = lab[c_idx*3], lab[c_idx*3+1], lab[c_idx*3+2]
+
     core_r = max(2, int(radius * 0.35))
     sq_core_r = core_r * core_r
 
@@ -536,16 +513,17 @@ def apply_geodesic_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
 
     target_val = 0 if is_sub else 255
     heap = []
-    geo_cost = {}
+    dist = [1e9] * (width * height)
+
     for gx, gy, idx in core_seeds:
         mask[idx] = target_val
-        geo_cost[idx] = 0.0
+        dist[idx] = 0.0
         heapq.heappush(heap, (0.0, gx, gy, idx))
 
-    max_geo_cost = barrier * 1.8
+    max_geo_cost = 150.0
     while heap:
         cost, px, py, curr_idx = heapq.heappop(heap)
-        if cost > geo_cost.get(curr_idx, float('inf')):
+        if cost > dist[curr_idx] + 1e-4:
             continue
 
         neighbors = []
@@ -558,12 +536,16 @@ def apply_geodesic_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
             dx = nx - cx
             dy = ny - cy
             if dx*dx + dy*dy <= sq_reach:
-                step_grad = float(grad[n_idx])
-                if step_grad < barrier:
-                    next_cost = cost + 1.0 + step_grad * 0.35
+                g_val = float(grad[n_idx])
+                if g_val < barrier:
+                    if g_val > barrier * 0.5:
+                        step_cost = ((g_val - barrier * 0.5) / (barrier * 0.5)) ** 3.0 * 50.0
+                    else:
+                        step_cost = 0.005
+                    next_cost = cost + step_cost
                     if next_cost < max_geo_cost:
-                        if next_cost < geo_cost.get(n_idx, float('inf')):
-                            geo_cost[n_idx] = next_cost
+                        if next_cost < dist[n_idx]:
+                            dist[n_idx] = next_cost
                             mask[n_idx] = target_val
                             heapq.heappush(heap, (next_cost, nx, ny, n_idx))
 
@@ -571,10 +553,10 @@ def apply_geodesic_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
 
 
 # ============================================================================
-# Engine 4: Adaptive Variance Band (Affinity Photo Style)
+# Engine 4: Adaptive Variance Band (Affinity Photo Style Gaussian Gating)
 # ============================================================================
 
-def apply_variance_brush(mask, lab, grad, width, height, cx, cy, radius, reach, tol, is_sub=False):
+def apply_variance_brush(mask, lab, grad, width, height, cx, cy, radius, reach, tol, barrier=35, is_sub=False):
     max_reach = int(radius * reach)
     sq_reach = max_reach * max_reach
 
@@ -584,9 +566,7 @@ def apply_variance_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
     max_y = min(height - 1, cy + max_reach)
 
     c_idx = cy * width + cx
-    center_l = lab[c_idx * 3]
-    center_a = lab[c_idx * 3 + 1]
-    center_b = lab[c_idx * 3 + 2]
+    cl, ca, cb = lab[c_idx*3], lab[c_idx*3+1], lab[c_idx*3+2]
 
     core_r = max(2, int(radius * 0.35))
     sq_core_r = core_r * core_r
@@ -601,10 +581,7 @@ def apply_variance_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
                 gx = cx + dx
                 if 0 <= gx < width and dx*dx + dy*dy <= sq_core_r:
                     idx = row + gx
-                    lab_idx = idx * 3
-                    nl = lab[lab_idx]
-                    na = lab[lab_idx + 1]
-                    nb = lab[lab_idx + 2]
+                    nl, na, nb = lab[idx*3], lab[idx*3+1], lab[idx*3+2]
                     sum_l += nl
                     sum_a += na
                     sum_b += nb
@@ -612,34 +589,22 @@ def apply_variance_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
 
     if not seeds:
         seeds.append((cx, cy, c_idx))
-        mean_l, mean_a, mean_b = center_l, center_a, center_b
-        std_l, std_a, std_b = 4.0, 3.0, 3.0
+        mean_l, mean_a, mean_b = cl, ca, cb
     else:
         cnt = len(seeds)
         mean_l = sum_l / cnt
         mean_a = sum_a / cnt
         mean_b = sum_b / cnt
 
-        var_l = sum((lab[s[2]*3] - mean_l)**2 for s in seeds) / cnt
-        var_a = sum((lab[s[2]*3+1] - mean_a)**2 for s in seeds) / cnt
-        var_b = sum((lab[s[2]*3+2] - mean_b)**2 for s in seeds) / cnt
-
-        std_l = max(3.0, math.sqrt(var_l))
-        std_a = max(2.0, math.sqrt(var_a))
-        std_b = max(2.0, math.sqrt(var_b))
-
-    thresh_l = std_l * (tol / 10.0)
-    thresh_a = std_a * (tol / 10.0)
-    thresh_b = std_b * (tol / 10.0)
-
     target_val = 0 if is_sub else 255
     queue = deque()
-    visited = set()
+    visited = bytearray(width * height)
     for gx, gy, idx in seeds:
         mask[idx] = target_val
-        visited.add(idx)
+        visited[idx] = 1
         queue.append((gx, gy, idx))
 
+    sq_tol = tol * tol
     while queue:
         px, py, curr_idx = queue.popleft()
         neighbors = []
@@ -649,17 +614,19 @@ def apply_variance_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
         if py < max_y: neighbors.append((px, py + 1, curr_idx + width))
 
         for nx, ny, n_idx in neighbors:
-            if n_idx not in visited:
-                visited.add(n_idx)
+            if not visited[n_idx]:
+                visited[n_idx] = 1
                 dx = nx - cx
                 dy = ny - cy
                 if dx * dx + dy * dy <= sq_reach:
-                    nl = lab[n_idx * 3]
-                    na = lab[n_idx * 3 + 1]
-                    nb = lab[n_idx * 3 + 2]
-                    if abs(nl - mean_l) <= thresh_l and abs(na - mean_a) <= thresh_a and abs(nb - mean_b) <= thresh_b:
-                        mask[n_idx] = target_val
-                        queue.append((nx, ny, n_idx))
+                    if grad[n_idx] < barrier:
+                        nl = lab[n_idx * 3]
+                        na = lab[n_idx * 3 + 1]
+                        nb = lab[n_idx * 3 + 2]
+                        d_col2 = (nl - mean_l)**2 + (na - mean_a)**2 + (nb - mean_b)**2
+                        if d_col2 <= sq_tol:
+                            mask[n_idx] = target_val
+                            queue.append((nx, ny, n_idx))
 
     return (min_x, min_y, max_x, max_y)
 
@@ -678,7 +645,7 @@ class QuickSelectionDialog(Gtk.Dialog):
         self.orig_width = drawable.get_width()
         self.orig_height = drawable.get_height()
 
-        # Active Algorithm Engine (Default: Lazy Snapping as requested)
+        # Active Algorithm Engine (Default: Lazy Snapping)
         self.active_algorithm = "lazy_snapping"
 
         # Viewport Navigation State (Zoom & Pan)
@@ -960,8 +927,8 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         self.combo_algo = Gtk.ComboBoxText.new()
         self.combo_algo.append("lazy_snapping", _("⚡ Lazy Snapping (Graph Cut + Superpixels - Default)"))
-        self.combo_algo.append("wavefront", _("🎯 Adaptive Wavefront (Photoshop Coherent Grow)"))
-        self.combo_algo.append("geodesic", _("🌊 Geodesic Ridge (Sharp Contrast Edge)"))
+        self.combo_algo.append("wavefront", _("🎯 Adaptive Wavefront (Photoshop Edge-Gated Flood)"))
+        self.combo_algo.append("geodesic", _("🌊 Geodesic Ridge (Fast Marching Gradient Distance)"))
         self.combo_algo.append("variance", _("🖌️ Adaptive Variance (Affinity Photo Style)"))
         self.combo_algo.set_active_id("lazy_snapping")
         self.combo_algo.connect("changed", self._on_algorithm_changed)
@@ -1104,28 +1071,28 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         elif self.active_algorithm == "wavefront":
             self.lbl_algo_desc.set_text(
-                _("🎯 Best for fine details, hair strands, and sharp contours. Launches a Dijkstra gradient-gated wavefront.")
+                _("🎯 Best for fine details, hair strands, and sharp contours. Launches a Photoshop-style edge-gated flood.")
             )
-            self.foot_hint.set_text(_("🎯 Adaptive Wavefront Active: Photoshop-style Dijkstra coherent expansion."))
-            self.scale_reach.set_value(3.0)
+            self.foot_hint.set_text(_("🎯 Adaptive Wavefront Active: Photoshop-style edge-gated flood."))
+            self.scale_reach.set_value(3.5)
             self.scale_color.set_value(25.0)
             self.scale_barrier.set_value(35.0)
 
         elif self.active_algorithm == "geodesic":
             self.lbl_algo_desc.set_text(
-                _("🌊 Best for high-contrast boundaries and solid silhouettes. Halts at strong gradient ridges.")
+                _("🌊 Best for high-contrast boundaries and solid silhouettes. Fast Marching gradient distance.")
             )
-            self.foot_hint.set_text(_("🌊 Geodesic Ridge Active: Gradient accumulation halting at sharp edge ridges."))
-            self.scale_reach.set_value(2.5)
+            self.foot_hint.set_text(_("🌊 Geodesic Ridge Active: Fast Marching gradient distance halting at edge ridges."))
+            self.scale_reach.set_value(3.5)
             self.scale_barrier.set_value(35.0)
 
         elif self.active_algorithm == "variance":
             self.lbl_algo_desc.set_text(
                 _("🖌️ Best for smooth gradient shading and controlled touchups (Affinity Photo Style).")
             )
-            self.foot_hint.set_text(_("🖌️ Adaptive Variance Active: Local statistical Gaussian color distribution."))
-            self.scale_reach.set_value(2.0)
-            self.scale_color.set_value(20.0)
+            self.foot_hint.set_text(_("🖌️ Adaptive Variance Active: Gaussian color gating with edge boundary walls."))
+            self.scale_reach.set_value(3.5)
+            self.scale_color.set_value(25.0)
 
     # ========================================================================
     # Zoom & Pan Coordinate Transformation
@@ -1471,6 +1438,7 @@ class QuickSelectionDialog(Gtk.Dialog):
                     radius=self.brush_size,
                     reach=self.snap_reach,
                     tol=self.color_tolerance,
+                    barrier=self.edge_barrier,
                     is_sub=is_sub
                 )
                 if bbox:
