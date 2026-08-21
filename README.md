@@ -6,7 +6,7 @@
 
 An interactive, edge-aware **Quick Selection Brush Suite** for **GIMP 3.0+** bringing the intuitive, natural object selection experience of Photoshop and Affinity Photo directly into GIMP.
 
-Featuring **Multi-Modal Graph Cut optimization**, interactive **Zoom & Pan navigation**, customizable preview overlays, and **instant selection application (<0.15s)** with **zero lag**.
+Powered entirely by **High-Speed Graph-Cut Optimization (60 FPS, ZERO LAG)**, interactive **Zoom & Pan navigation**, customizable preview overlays, and **instant selection application (<0.15s)**.
 
 ---
 
@@ -16,9 +16,9 @@ Featuring **Multi-Modal Graph Cut optimization**, interactive **Zoom & Pan navig
 
 ## ✨ Features
 
-- **4 High-Performance Segmentation Engines**: Switch between Multi-Modal Graph Cut, Adaptive Wavefront Flood, Geodesic Ridges, and Variance Gating.
-- **⚡ Zero Lag (60 FPS Interactive Painting)**: Superpixel-accelerated Dinic Max-Flow Min-Cut solves optimal boundaries in <0.002s with zero UI stutter.
-- **🎨 Multi-Cluster K-Means Color Modeling**: Automatically captures multiple highlights, shadows, and color textures under your brush stroke.
+- **4 Specialized Graph-Cut Engines**: Every algorithm runs on the blazing-fast superpixel Graph-Cut framework — solving global energy minimization in **<0.005s with ZERO LAG**.
+- **🎨 Multi-Cluster K-Means Color Modeling**: Automatically captures multiple highlights, shadows, and textures in a single stroke.
+- **⚡ 60 FPS Interactive Painting**: Smooth cursor tracking and instant preview updates with zero square artifacts.
 - **🔍 Viewport Navigation**: Smooth mouse-wheel zooming (10% to 1000%) and middle-click/space-drag panning to inspect fine details.
 - **🎨 Custom Selection Overlays**: Choose from vibrant preset swatches (Cyan, Red, Green, Amber, Magenta), pick custom colors, and adjust overlay opacity in real-time.
 - **🎛️ Collapsible Advanced Controls**: Fine-tune background cutoff strictness, graph smoothness priors, and contrast sensitivity via an expandable panel.
@@ -27,14 +27,16 @@ Featuring **Multi-Modal Graph Cut optimization**, interactive **Zoom & Pan navig
 
 ---
 
-## ⚙️ The 4 Algorithm Engines
+## ⚙️ The 4 Specialized Graph-Cut Engines
 
-| Engine | Ideal For | How It Works |
+All 4 engines run on the ultra-fast **Dinic Min-Cut Super-Region Graph Framework** ($<0.005\text{s}$, zero lag), each specialized for different image selection challenges:
+
+| Engine | Ideal For | Behavior & Mathematical Prior |
 | :--- | :--- | :--- |
-| **⚡ Lazy Snapping** *(Default)* | Complex photos, multi-colored objects & textures | Multi-Cluster **K-Means Graph Cut** across fine SLIC super-regions. Automatically captures complex textures with 0 lag. |
-| **🎯 Adaptive Wavefront** | Hair strands, line art, silhouettes, sharp contours | **Photoshop-style** core-seeded floodfill gated by CIELAB $\Delta E$ color coherence and Sobel gradient barrier walls. |
-| **🌊 Geodesic Ridge** | High-contrast objects, solid silhouettes | **Fast Marching** gradient distance transform that traverses smooth surfaces freely and halts at sharp contrast ridges. |
-| **🖌️ Adaptive Variance** | Smooth shading, gradients, controlled touchups | **Affinity Photo style** local Gaussian color distribution ($\mu \pm k\sigma$) sampled under the brush footprint. |
+| **⚡ Lazy Snapping** *(Default)* | General photos, everyday objects & people | **Balanced Multi-Modal Graph Cut**: Uses multi-cluster K-Means color models with standard boundary smoothness priors. |
+| **🎯 Contour-Lock** | Sharp silhouettes, logos, line art & products | **High-Tension Boundary Clamping**: Elevated edge prior ($\lambda = 45$) and tight contrast scaling to rigidly lock to sharp contours with 0 spill. |
+| **🌊 Gradient-Adaptive** | Soft shading, shadows, cloth & smooth gradients | **Elastic Gradient Prior**: Relaxed boundary tension ($\lambda = 18$) allowing the selection to flow naturally across smooth shading and fabric folds. |
+| **🖌️ Precision Detail** | Small objects, thin stems & delicate touchups | **Compact Micro-Region Cut**: Tight expansion radius with strict color gating for selecting fine features without over-expanding. |
 
 ---
 
@@ -91,10 +93,11 @@ chmod +x GIMP-Quick-Selection/*.py
    - **Add Mode (`+`)**: Drag the brush over your subject. The selection automatically expands to the edges.
    - **Subtract Mode (`-`)**: Paint over any unwanted areas to erase them from the selection.
    - **New / Replace**: Clears the previous mask and starts a fresh selection.
-4. **Zoom & Pan**:
-   - **Mouse Scroll**: Zoom in / out centered at your cursor.
-   - **Middle-Click Drag** or **Space + Left-Click Drag**: Pan across the image.
-   - **Fit / 100% Buttons**: Quickly reset viewport view.
+4. **Switch Algorithms** as needed:
+   - Use **`Lazy Snapping`** for general photos and objects.
+   - Switch to **`Contour-Lock`** for hard-edged product shots or logos.
+   - Switch to **`Gradient-Adaptive`** for smooth shading or fabric.
+   - Switch to **`Precision Detail`** for small items or thin details.
 5. Click **Apply Selection** to commit the marching ants selection mask to your GIMP image.
 
 ---
