@@ -41,27 +41,27 @@ Featuring **4 switchable segmentation algorithm engines**, interactive **Zoom & 
 
 ### Option 1: Quick Install via Git Clone (Recommended)
 
-Open your terminal or command prompt, navigate to your GIMP 3 plug-ins folder, and clone the repository:
+Open your terminal or command prompt, navigate to your GIMP 3 plug-ins folder, and clone the repository directly:
 
 #### 🪟 Windows (PowerShell / Command Prompt):
 ```powershell
 cd "$env:APPDATA\GIMP\3.0\plug-ins"
-git clone https://github.com/bunnywaffle/GIMP-Quick-Selection.git gradient-gated-select
+git clone https://github.com/bunnywaffle/GIMP-Quick-Selection.git
 ```
 *(If using GIMP 3.2, replace `3.0` with `3.2`)*
 
 #### 🐧 Linux:
 ```bash
 cd ~/.config/GIMP/3.0/plug-ins/
-git clone https://github.com/bunnywaffle/GIMP-Quick-Selection.git gradient-gated-select
-chmod +x gradient-gated-select/gradient-gated-select.py
+git clone https://github.com/bunnywaffle/GIMP-Quick-Selection.git
+chmod +x GIMP-Quick-Selection/*.py
 ```
 
 #### 🍏 macOS:
 ```bash
 cd ~/Library/Application\ Support/GIMP/3.0/plug-ins/
-git clone https://github.com/bunnywaffle/GIMP-Quick-Selection.git gradient-gated-select
-chmod +x gradient-gated-select/gradient-gated-select.py
+git clone https://github.com/bunnywaffle/GIMP-Quick-Selection.git
+chmod +x GIMP-Quick-Selection/*.py
 ```
 
 ---
@@ -69,16 +69,15 @@ chmod +x gradient-gated-select/gradient-gated-select.py
 ### Option 2: Manual Download
 
 1. Click **Code $\to$ Download ZIP** on GitHub and extract the archive.
-2. Rename the extracted folder to `gradient-gated-select`.
-3. Copy the `gradient-gated-select` folder into your GIMP 3 `plug-ins/` directory:
+2. Move the extracted `GIMP-Quick-Selection` folder into your GIMP 3 `plug-ins/` directory:
    - **Windows**: `C:\Users\<YourUsername>\AppData\Roaming\GIMP\3.0\plug-ins\`
    - **Linux**: `~/.config/GIMP/3.0/plug-ins/`
    - **macOS**: `~/Library/Application Support/GIMP/3.0/plug-ins/`
-4. *(Linux/macOS only)* Make the script executable:
+3. *(Linux/macOS only)* Make the scripts executable:
    ```bash
-   chmod +x gradient-gated-select/gradient-gated-select.py
+   chmod +x GIMP-Quick-Selection/*.py
    ```
-5. Restart GIMP.
+4. Restart GIMP.
 
 ---
 
