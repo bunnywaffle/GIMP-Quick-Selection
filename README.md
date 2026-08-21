@@ -1,105 +1,134 @@
-# GIMP Quick Selection Tool Suite
+# 🖌️ GIMP Quick Selection Brush Suite (Edge-Aware)
 
-An interactive, edge-aware **Quick Selection Brush Suite** for **GIMP 3** inspired by Adobe Photoshop and Affinity Photo's Quick Selection Tools.
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![GIMP Version](https://img.shields.io/badge/GIMP-3.0%20%2F%203.2%2B-orange.svg)](https://www.gimp.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-brightgreen.svg)](#installation)
 
-Featuring **4 switchable segmentation algorithm engines** to deliver pixel-perfect accuracy across any image type, from fine hair and anime line-art to complex textured photos and solid silhouettes.
+An interactive, edge-aware **Quick Selection Brush Suite** for **GIMP 3.0+** that brings the fast, intuitive object selection experience of Photoshop and Affinity Photo directly into GIMP.
+
+Featuring **4 switchable segmentation algorithm engines**, interactive **Zoom & Pan navigation**, customizable preview overlays, and **instant selection application (<0.15s)**.
 
 ---
 
-![GIMP Quick Selection Brush Screenshot](assets/screenshot.png)
-
----
-
-## ⚙️ 4 Selectable Algorithm Engines
-
-| Engine | Best For | How it Works |
-| :--- | :--- | :--- |
-| **🎯 Adaptive Wavefront** *(Photoshop Style)* | **Fine details, hair strands, line art, anime, crisp contours** | Direct pixel-level wavefront propagation with CIELAB $\Delta E$ and Sobel barrier gating. Evaluates exact sub-pixel boundaries without clustering artifacts. |
-| **⚡ Lazy Snapping** *(Graph Cut + Superpixels)* | **Complex photos, textured surfaces, general objects** | SIGGRAPH Lazy Snapping energy minimization (Dinic Min-Cut) over SLIC super-regions with boundary prior smoothness. |
-| **🌊 Geodesic Ridge** *(Gradient Distance)* | **Solid objects, strong silhouettes, high-contrast edges** | Geodesic gradient accumulation halting strictly at contrast boundary ridges without bleeding. |
-| **🖌️ Adaptive Variance** *(Affinity Photo Style)* | **Smooth gradient shading, controlled touchups** | Local statistical Gaussian color distribution ($\mu \pm k\sigma$) sampled directly under the cursor footprint. |
-
-> **Tip:** You can switch between algorithms on the fly during the same session! For instance, paint the main subject body using **Lazy Snapping** or **Geodesic Ridge**, then switch to **Adaptive Wavefront** to capture fine hair strands and tricky corners.
+![GIMP Quick Selection Brush UI](assets/screenshot.png)
 
 ---
 
 ## ✨ Features
 
-- **Multi-Algorithm Engine Selector**: Switch between 4 distinct segmentation engines instantly from the UI.
-- **Photoshop / Affinity Photo Selection Workflow**:
-  - **Add Mode (+)**: Paint over subjects to continuously accumulate selection.
-  - **Subtract Mode (-)**: Paint over unwanted areas to carve away background spills.
-  - **New / Replace Mode**: Reset and start a fresh selection.
-- **🔍 Interactive Zoom & Pan Navigation**:
-  - **Mouse Scroll Wheel**: Smooth zoom in/out (from 10% to 1000% magnification) anchored to the mouse cursor for pixel-precise selections.
-  - **Middle-Click Drag / Right-Click Drag / Spacebar + Left-Click Drag**: Smooth pan across the canvas.
-  - Toolbar quick zoom buttons: `[-]`, `[+]`, `[Fit]`, and `[100%]`.
-- **Live Brush Ring Cursor**: Adaptive cursor ring dynamically tracks the exact brush radius and current zoom level.
-- **Customizable Preview Overlays**:
-  - 1-Click preset swatches: 🔵 **Cyan**, 🔴 **Red (Ruby Quick Mask)**, 🟢 **Green**, 🟡 **Amber / Yellow**, 🟣 **Magenta**.
-  - Full **RGBA Color Picker** for any custom overlay color.
-  - **Overlay Opacity Slider** (10% to 90%).
-- **Snapping Tuning & Presets**:
-  - **Snapping Reach**: Adjust how far the selection explores beyond the brush stroke (`Precise`, `Balanced`, `Broad`).
-  - **Color Tolerance ($\Delta E$)**: Tune color boundary strictness.
-  - **Edge Barrier Strictness**: Tune contrast barrier sensitivity.
-- **High Performance & Instant Application**:
-  - Real-time painting at **60+ FPS**.
-  - **Instant selection application (<0.15s)** to native GIMP 3 buffers on full-resolution 4K and 8K images.
-- **↩ Undo & Clear**: Multi-level undo stack for non-destructive editing.
+- **4 Switchable Segmentation Engines**: Choose the best algorithm for your subject — from complex photographic textures and sharp silhouettes to fine hair and soft gradients.
+- **⚡ Fast & Responsive**: Real-time localized preview updates as you paint.
+- **🔍 Viewport Navigation**: Smooth mouse-wheel zooming (10% to 1000%) and middle-click/space-drag panning to inspect fine details.
+- **🎨 Custom Selection Overlays**: Choose from vibrant preset swatches (Cyan, Red, Green, Amber, Magenta), pick custom colors, and adjust overlay opacity in real-time.
+- **🎛️ Collapsible Advanced Controls**: Fine-tune background cutoff strictness, graph smoothness priors, and contrast sensitivity via an expandable panel.
+- **⚡ Instant Apply (<0.15s)**: High-speed precomputed row assembly applies 4K/8K selections into GIMP's selection buffer with zero UI lag or freezing.
+- **↩ Full Undo & History**: Easily step backward through previous brush strokes.
 
 ---
 
-## 📦 Installation
+## ⚙️ The 4 Algorithm Engines
 
-### Windows
-1. Download or clone this repository.
-2. Copy the `gradient-gated-select` folder into your GIMP 3 plug-ins directory:
-   ```text
-   %APPDATA%\GIMP\3.0\plug-ins\gradient-gated-select\
-   ```
-   *(or `%APPDATA%\GIMP\3.2\plug-ins\gradient-gated-select\` if using GIMP 3.2+)*
-3. Restart GIMP.
-
-### Linux
-1. Copy the `gradient-gated-select` folder into:
-   ```bash
-   ~/.config/GIMP/3.0/plug-ins/gradient-gated-select/
-   ```
-2. Ensure the plugin file is executable:
-   ```bash
-   chmod +x ~/.config/GIMP/3.0/plug-ins/gradient-gated-select/gradient-gated-select.py
-   ```
-3. Restart GIMP.
-
-### macOS
-1. Copy the `gradient-gated-select` folder into:
-   ```text
-   ~/Library/Application Support/GIMP/3.0/plug-ins/gradient-gated-select/
-   ```
-2. Make it executable:
-   ```bash
-   chmod +x ~/Library/Application\ Support/GIMP/3.0/plug-ins/gradient-gated-select/gradient-gated-select.py
-   ```
-3. Restart GIMP.
+| Engine | Ideal For | How It Works |
+| :--- | :--- | :--- |
+| **⚡ Lazy Snapping** *(Default)* | Complex photos, natural textures, animals & objects | Global **SIGGRAPH Min-Cut** optimization across ~1,500 fine SLIC super-regions. Automatically snaps to subject contours with zero spill. |
+| **🎯 Adaptive Wavefront** | Hair strands, line art, silhouettes, sharp contours | **Photoshop-style** core-seeded floodfill gated by CIELAB $\Delta E$ color coherence and Sobel gradient barrier walls. |
+| **🌊 Geodesic Ridge** | High-contrast objects, solid silhouettes | **Fast Marching** gradient distance transform that traverses smooth surfaces freely and halts at sharp contrast ridges. |
+| **🖌️ Adaptive Variance** | Smooth shading, gradients, controlled touchups | **Affinity Photo style** local Gaussian color distribution ($\mu \pm k\sigma$) sampled under the brush footprint. |
 
 ---
 
-## 🚀 How to Use
+## 🚀 Installation
 
-1. Open any image with an active layer in GIMP 3.
+### Option 1: Quick Install via Git Clone (Recommended)
+
+Open your terminal or command prompt, navigate to your GIMP 3 plug-ins folder, and clone the repository:
+
+#### 🪟 Windows (PowerShell / Command Prompt):
+```powershell
+cd "$env:APPDATA\GIMP\3.0\plug-ins"
+git clone https://github.com/bunnywaffle/GIMP-Quick-Selection.git gradient-gated-select
+```
+*(If using GIMP 3.2, replace `3.0` with `3.2`)*
+
+#### 🐧 Linux:
+```bash
+cd ~/.config/GIMP/3.0/plug-ins/
+git clone https://github.com/bunnywaffle/GIMP-Quick-Selection.git gradient-gated-select
+chmod +x gradient-gated-select/gradient-gated-select.py
+```
+
+#### 🍏 macOS:
+```bash
+cd ~/Library/Application\ Support/GIMP/3.0/plug-ins/
+git clone https://github.com/bunnywaffle/GIMP-Quick-Selection.git gradient-gated-select
+chmod +x gradient-gated-select/gradient-gated-select.py
+```
+
+---
+
+### Option 2: Manual Download
+
+1. Click **Code $\to$ Download ZIP** on GitHub and extract the archive.
+2. Rename the extracted folder to `gradient-gated-select`.
+3. Copy the `gradient-gated-select` folder into your GIMP 3 `plug-ins/` directory:
+   - **Windows**: `C:\Users\<YourUsername>\AppData\Roaming\GIMP\3.0\plug-ins\`
+   - **Linux**: `~/.config/GIMP/3.0/plug-ins/`
+   - **macOS**: `~/Library/Application Support/GIMP/3.0/plug-ins/`
+4. *(Linux/macOS only)* Make the script executable:
+   ```bash
+   chmod +x gradient-gated-select/gradient-gated-select.py
+   ```
+5. Restart GIMP.
+
+---
+
+## 🎮 How to Use
+
+1. Open an image in GIMP with an active layer.
 2. In the top menu, go to:
    **`Select` $\to$ `Quick Selection Brush (Edge-Aware)...`**
-3. Select your preferred **Algorithm Engine** from the dropdown.
-4. **Paint** over your subject with Left-Click Drag.
-5. **Zoom / Pan**:
-   - Use the **Mouse Scroll Wheel** to zoom in on fine details.
-   - Hold **Middle-Click** or **Spacebar + Left-Click** to pan around.
-6. Switch algorithm or adjust **Brush Size**, **Tolerance**, or **Reach** as needed.
-7. Click **`[Apply Selection]`** to commit the selection back to GIMP.
+3. **Paint over the subject** you want to select:
+   - **Add Mode (`+`)**: Drag the brush over your subject. The selection automatically expands to the edges.
+   - **Subtract Mode (`-`)**: Paint over any unwanted areas to erase them from the selection.
+   - **New / Replace**: Clears the previous mask and starts a fresh selection.
+4. **Zoom & Pan**:
+   - **Mouse Scroll**: Zoom in / out centered at your cursor.
+   - **Middle-Click Drag** or **Space + Left-Click Drag**: Pan across the image.
+   - **Fit / 100% Buttons**: Quickly reset viewport view.
+5. Click **Apply Selection** to commit the marching ants selection mask to your GIMP image.
+
+---
+
+## ⌨️ Shortcuts & Controls
+
+| Action | Shortcut / Control |
+| :--- | :--- |
+| **Paint / Select** | `Left Click + Drag` |
+| **Zoom In / Out** | `Mouse Wheel Up / Down` |
+| **Pan Canvas** | `Middle Click Drag` or `Spacebar + Left Click Drag` |
+| **Undo Stroke** | Click `↩ Undo` or press button |
+| **Clear Selection** | Click `Clear` |
+| **Commit Selection** | Click `Apply Selection` (or press `Enter`) |
+| **Cancel Dialog** | Click `Cancel` (or press `Escape`) |
+
+---
+
+## 🔧 Advanced Fine-Tuning
+
+Click the **`🔧 Advanced Parameters & Fine Tuning`** toggle in the right sidebar to access precision adjustments:
+
+- **Hard Background Cutoff ($\Delta E$)**: Sets the strictness threshold at which diverging colors are permanently excluded from the foreground.
+- **Graph Cut Smoothness Prior ($\lambda$)**: Controls silhouette edge tension. Higher values ensure cleaner silhouettes and eliminate speckling in textured areas.
+- **Boundary Contrast Sensitivity ($\sigma$)**: Controls how sharp a contrast difference must be to form a boundary cut.
 
 ---
 
 ## 📄 License
 
-This project is licensed under the **GNU General Public License v3.0 (GPLv3)** - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)** — see the [LICENSE](LICENSE) file for details.
+
+---
+
+## 🤝 Contributing & Feedback
+
+Contributions, feature suggestions, and bug reports are welcome! Feel free to open an issue or submit a Pull Request on [GitHub](https://github.com/bunnywaffle/GIMP-Quick-Selection).
