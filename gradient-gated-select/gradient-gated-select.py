@@ -3,11 +3,11 @@
 """
 Multi-Algorithm Quick Selection Brush Suite for GIMP 3
 ======================================================
-Interactive Quick Selection tool with 4 switchable segmentation engines:
-1. ⚡ Lazy Snapping (Graph Cut + Superpixels) - Default: SIGGRAPH Global Energy Min-Cut
-2. 🎯 Adaptive Wavefront (Photoshop Coherent Grow) - Dijkstra gradient-gated wavefront
-3. 🌊 Geodesic Ridge (Gradient Distance) - Gradient accumulation halting at contrast boundaries
-4. 🖌️ Adaptive Variance (Affinity Photo Style) - Core Gaussian distribution with edge gating
+Interactive Quick Selection tool with 4 edge-snapping segmentation engines:
+1. ⚡ Intelligent Lazy Snapping (Graph Cut + Superpixels - Default)
+2. 🎯 Adaptive Wavefront (Photoshop Coherent Grow)
+3. 🌊 Geodesic Ridge (Gradient Distance)
+4. 🖌️ Adaptive Variance (Affinity Photo Style)
 Features real-time Zoom & Pan navigation, custom overlays, and instant application.
 """
 
@@ -157,9 +157,8 @@ def compute_slic(lab_data, width, height, num_superpixels=1500, compactness=16.0
                     dl = cl - lab_data[lab_idx]
                     da = ca - lab_data[lab_idx + 1]
                     db = cb - lab_data[lab_idx + 2]
-                    d_color2 = dl * dl + da * da + db * db
+                    dist = dl*dl + da*da + db*db + d_spatial2
 
-                    dist = d_color2 + d_spatial2
                     if dist < distances[p_idx]:
                         distances[p_idx] = dist
                         labels[p_idx] = k
@@ -304,15 +303,20 @@ class DinicMaxFlow:
         return set(i for i in range(self.num_nodes) if visited[i])
 
 
-def apply_lazy_snapping_brush(
+def apply_intelligent_lazy_snapping(
     active_selection,
     fg_brush_nodes,
     sp_centers,
     sp_neighbors,
     num_sp,
-    smoothness_weight=24.0,
-    search_reach=2.4
+    smoothness_weight=22.0,
+    expansion_reach=3.5
 ):
+    """
+    Intelligent SIGGRAPH Lazy Snapping with generous object expansion:
+    Allows user strokes to naturally fill contiguous subject boundaries
+    and snaps to high-contrast silhouette edges via Min-Cut optimization.
+    """
     if not fg_brush_nodes:
         return active_selection
 
@@ -320,21 +324,29 @@ def apply_lazy_snapping_brush(
     max_bx = max(sp_centers[b][3] for b in fg_brush_nodes)
     min_by = min(sp_centers[b][4] for b in fg_brush_nodes)
     max_by = max(sp_centers[b][4] for b in fg_brush_nodes)
-    stroke_span = max(20.0, math.hypot(max_bx - min_bx, max_by - min_by))
-    search_radius = max(40.0, stroke_span * search_reach)
+
+    stroke_span = max(35.0, math.hypot(max_bx - min_bx, max_by - min_by))
+    search_radius = max(80.0, stroke_span * expansion_reach)
     sq_search_r = search_radius * search_radius
-    sq_inner_bound = (search_radius * 0.70) ** 2
+    sq_outer_anchor = (search_radius * 0.90) ** 2
+
+    # Compute average foreground color from brushed seeds
+    fg_l = sum(sp_centers[b][0] for b in fg_brush_nodes) / len(fg_brush_nodes)
+    fg_a = sum(sp_centers[b][1] for b in fg_brush_nodes) / len(fg_brush_nodes)
+    fg_b = sum(sp_centers[b][2] for b in fg_brush_nodes) / len(fg_brush_nodes)
 
     candidate_nodes = set()
-    outer_boundary_nodes = set()
+    hard_bg_nodes = set()
 
     for sp_id in range(num_sp):
         cx, cy = sp_centers[sp_id][3], sp_centers[sp_id][4]
         min_d2 = min((cx - sp_centers[b][3])**2 + (cy - sp_centers[b][4])**2 for b in fg_brush_nodes)
         if min_d2 <= sq_search_r:
             candidate_nodes.add(sp_id)
-            if min_d2 >= sq_inner_bound:
-                outer_boundary_nodes.add(sp_id)
+            l, a, b = sp_centers[sp_id][0], sp_centers[sp_id][1], sp_centers[sp_id][2]
+            d_fg_col = math.sqrt((l - fg_l)**2 + (a - fg_a)**2 + (b - fg_b)**2)
+            if min_d2 >= sq_outer_anchor or d_fg_col > 45.0:
+                hard_bg_nodes.add(sp_id)
 
     if not candidate_nodes:
         return active_selection
@@ -345,44 +357,38 @@ def apply_lazy_snapping_brush(
 
     mf = DinicMaxFlow(local_N)
 
-    fg_l = sum(sp_centers[b][0] for b in fg_brush_nodes) / len(fg_brush_nodes)
-    fg_a = sum(sp_centers[b][1] for b in fg_brush_nodes) / len(fg_brush_nodes)
-    fg_b = sum(sp_centers[b][2] for b in fg_brush_nodes) / len(fg_brush_nodes)
-
-    if outer_boundary_nodes:
-        bg_l = sum(sp_centers[b][0] for b in outer_boundary_nodes) / len(outer_boundary_nodes)
-        bg_a = sum(sp_centers[b][1] for b in outer_boundary_nodes) / len(outer_boundary_nodes)
-        bg_b = sum(sp_centers[b][2] for b in outer_boundary_nodes) / len(outer_boundary_nodes)
+    # Compute background color model
+    if hard_bg_nodes:
+        bg_l = sum(sp_centers[b][0] for b in hard_bg_nodes) / len(hard_bg_nodes)
+        bg_a = sum(sp_centers[b][1] for b in hard_bg_nodes) / len(hard_bg_nodes)
+        bg_b = sum(sp_centers[b][2] for b in hard_bg_nodes) / len(hard_bg_nodes)
     else:
         bg_l, bg_a, bg_b = 50.0, 0.0, 0.0
 
+    # Add T-links
     for global_id, local_id in node_to_local.items():
         if global_id in fg_brush_nodes:
             mf.add_tlinks(local_id, 100000.0, 0.0)
-        elif global_id in outer_boundary_nodes:
+        elif global_id in hard_bg_nodes:
             mf.add_tlinks(local_id, 0.0, 100000.0)
         else:
             l, a, b = sp_centers[global_id][0], sp_centers[global_id][1], sp_centers[global_id][2]
             d_fg = math.sqrt((l - fg_l)**2 + (a - fg_a)**2 + (b - fg_b)**2)
             d_bg = math.sqrt((l - bg_l)**2 + (a - bg_a)**2 + (b - bg_b)**2)
-
             eps = 0.001
             e_fg = d_fg / (d_fg + d_bg + eps)
             e_bg = d_bg / (d_fg + d_bg + eps)
+            mf.add_tlinks(local_id, (1.0 - e_fg) * 35.0, (1.0 - e_bg) * 35.0)
 
-            mf.add_tlinks(local_id, (1.0 - e_fg) * 28.0, (1.0 - e_bg) * 28.0)
-
+    # Add N-links (edge-weighted smoothness prior)
     for u_global, u_local in node_to_local.items():
         ul, ua, ub = sp_centers[u_global][0], sp_centers[u_global][1], sp_centers[u_global][2]
         for v_global in sp_neighbors[u_global]:
             if v_global in node_to_local and u_global < v_global:
                 v_local = node_to_local[v_global]
                 vl, va, vb = sp_centers[v_global][0], sp_centers[v_global][1], sp_centers[v_global][2]
-                dl = ul - vl
-                da = ua - va
-                db = ub - vb
-                color_dist = math.sqrt(dl*dl + da*da + db*db)
-                w_smooth = smoothness_weight / (color_dist + 1.0)
+                color_dist = math.sqrt((ul-vl)**2 + (ua-va)**2 + (ub-vb)**2)
+                w_smooth = smoothness_weight / (1.0 + (color_dist / 8.0)**2)
                 mf.add_nlink(u_local, v_local, w_smooth)
 
     fg_local_set = mf.compute_min_cut()
@@ -478,11 +484,9 @@ def apply_wavefront_brush(mask, lab, grad, width, height, cx, cy, radius, tol, r
                 na = lab[n_idx*3+1]
                 nb = lab[n_idx*3+2]
 
-                # Color distance to reference
                 col_dist = math.sqrt((nl-ref_l)**2 + (na-ref_a)**2 + (nb-ref_b)**2)
                 step_col = math.sqrt((nl-cur_l)**2 + (na-cur_a)**2 + (nb-cur_b)**2)
 
-                # Non-linear edge barrier penalty
                 g_val = float(grad[n_idx])
                 edge_penalty = ((g_val / barrier) ** 2.5) * 20.0 if g_val > barrier * 0.45 else 0.0
 
@@ -696,10 +700,10 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         # Parameters
         self.brush_size = 22
-        self.snap_reach = 2.4
+        self.snap_reach = 3.5
         self.color_tolerance = 25.0
         self.edge_barrier = 35
-        self.smoothness_weight = 24.0
+        self.smoothness_weight = 22.0
         self.selection_mode = "add"  # "add", "subtract", "replace"
 
         # Selection Overlay Color (Default Cyan 50% opacity)
@@ -1032,7 +1036,7 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         # Snapping Reach Slider
         tune_box.pack_start(Gtk.Label.new(_("Snapping Reach (Expansion Multiplier):")), False, False, 0)
-        self.scale_reach = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1.0, 3.5, 0.05)
+        self.scale_reach = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1.0, 5.0, 0.1)
         self.scale_reach.set_value(self.snap_reach)
         self.scale_reach.set_value_pos(Gtk.PositionType.RIGHT)
         self.scale_reach.set_tooltip_text(_("Controls how far beyond the brush stroke the selection expands"))
@@ -1062,17 +1066,17 @@ class QuickSelectionDialog(Gtk.Dialog):
         tune_box.pack_start(preset_box, False, False, 4)
         btn_p1 = Gtk.Button.new_with_label(_("Precise"))
         btn_p1.set_tooltip_text(_("Tight reach and strict edge barrier for fine detail"))
-        btn_p1.connect("clicked", lambda b: self._apply_preset(1.4, 16.0, 25))
+        btn_p1.connect("clicked", lambda b: self._apply_preset(2.0, 18.0, 25))
         preset_box.pack_start(btn_p1, True, True, 0)
 
         btn_p2 = Gtk.Button.new_with_label(_("Balanced"))
         btn_p2.set_tooltip_text(_("Standard balanced edge-aware snapping"))
-        btn_p2.connect("clicked", lambda b: self._apply_preset(2.4, 25.0, 35))
+        btn_p2.connect("clicked", lambda b: self._apply_preset(3.5, 25.0, 35))
         preset_box.pack_start(btn_p2, True, True, 0)
 
         btn_p3 = Gtk.Button.new_with_label(_("Broad"))
         btn_p3.set_tooltip_text(_("Wide reach for quickly filling larger areas"))
-        btn_p3.connect("clicked", lambda b: self._apply_preset(3.2, 38.0, 50))
+        btn_p3.connect("clicked", lambda b: self._apply_preset(4.8, 38.0, 50))
         preset_box.pack_start(btn_p3, True, True, 0)
 
         # Status & Pixel Count
@@ -1094,16 +1098,16 @@ class QuickSelectionDialog(Gtk.Dialog):
                 _("⚡ Best for complex photo textures, general objects, and natural images via global graph cut.")
             )
             self.foot_hint.set_text(_("⚡ Lazy Snapping Active: Superpixel Graph Cut energy minimization (Default)."))
-            self.scale_reach.set_value(2.4)
+            self.scale_reach.set_value(3.5)
             self.scale_color.set_value(25.0)
-            self.scale_barrier.set_value(24.0)
+            self.scale_barrier.set_value(22.0)
 
         elif self.active_algorithm == "wavefront":
             self.lbl_algo_desc.set_text(
                 _("🎯 Best for fine details, hair strands, and sharp contours. Launches a Dijkstra gradient-gated wavefront.")
             )
             self.foot_hint.set_text(_("🎯 Adaptive Wavefront Active: Photoshop-style Dijkstra coherent expansion."))
-            self.scale_reach.set_value(2.6)
+            self.scale_reach.set_value(3.0)
             self.scale_color.set_value(25.0)
             self.scale_barrier.set_value(35.0)
 
@@ -1112,7 +1116,7 @@ class QuickSelectionDialog(Gtk.Dialog):
                 _("🌊 Best for high-contrast boundaries and solid silhouettes. Halts at strong gradient ridges.")
             )
             self.foot_hint.set_text(_("🌊 Geodesic Ridge Active: Gradient accumulation halting at sharp edge ridges."))
-            self.scale_reach.set_value(2.0)
+            self.scale_reach.set_value(2.5)
             self.scale_barrier.set_value(35.0)
 
         elif self.active_algorithm == "variance":
@@ -1120,7 +1124,7 @@ class QuickSelectionDialog(Gtk.Dialog):
                 _("🖌️ Best for smooth gradient shading and controlled touchups (Affinity Photo Style).")
             )
             self.foot_hint.set_text(_("🖌️ Adaptive Variance Active: Local statistical Gaussian color distribution."))
-            self.scale_reach.set_value(1.8)
+            self.scale_reach.set_value(2.0)
             self.scale_color.set_value(20.0)
 
     # ========================================================================
@@ -1402,14 +1406,14 @@ class QuickSelectionDialog(Gtk.Dialog):
                     for s in self.current_stroke_seeds:
                         self.selected_superpixels.discard(s)
                 else:
-                    self.selected_superpixels = apply_lazy_snapping_brush(
+                    self.selected_superpixels = apply_intelligent_lazy_snapping(
                         self.selected_superpixels,
                         self.current_stroke_seeds,
                         self.sp_centers,
                         self.sp_neighbors,
                         self.num_sp,
                         smoothness_weight=self.smoothness_weight,
-                        search_reach=self.snap_reach
+                        expansion_reach=self.snap_reach
                     )
 
                 self.thumb_mask = bytearray(self.prev_w * self.prev_h)
