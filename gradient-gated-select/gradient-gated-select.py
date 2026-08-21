@@ -3,11 +3,11 @@
 """
 Multi-Algorithm Quick Selection Brush Suite for GIMP 3
 ======================================================
-Interactive Quick Selection tool with 4 switchable segmentation engines:
-1. 🎯 Adaptive Wavefront (Pixel-Level / Photoshop) - Best for line art, hair & sharp edges
-2. ⚡ Lazy Snapping (Graph Cut + Superpixels) - Best for general objects & textures
-3. 🌊 Geodesic Ridge (Gradient Distance) - Best for high-contrast silhouettes
-4. 🖌️ Adaptive Variance (Affinity Photo Style) - Best for smooth gradients & shading
+Interactive Quick Selection tool with 4 edge-snapping segmentation engines:
+1. 🎯 Adaptive Wavefront (Pixel-Level / Photoshop) - Core-seeded edge barrier growth
+2. ⚡ Lazy Snapping (Graph Cut + Superpixels) - Global Min-Cut on SLIC super-regions
+3. 🌊 Geodesic Ridge (Gradient Distance) - Gradient accumulation halting at contrast boundaries
+4. 🖌️ Adaptive Variance (Affinity Photo Style) - Core Gaussian distribution with edge gating
 Features real-time Zoom & Pan navigation, custom overlays, and instant application.
 """
 
@@ -393,11 +393,10 @@ def apply_lazy_snapping_brush(
 
 
 # ============================================================================
-# Engine 2: Adaptive Pixel Wavefront (Photoshop Style)
+# Engine 2: Adaptive Pixel Wavefront (Photoshop Style - Core Seeded)
 # ============================================================================
 
 def apply_wavefront_brush(mask, lab, grad, width, height, cx, cy, radius, tol, reach, barrier, is_sub):
-    sq_r = radius * radius
     max_reach = int(radius * reach)
     sq_reach = max_reach * max_reach
     sq_tol = tol * tol
@@ -407,43 +406,51 @@ def apply_wavefront_brush(mask, lab, grad, width, height, cx, cy, radius, tol, r
     min_y = max(0, cy - max_reach)
     max_y = min(height - 1, cy + max_reach)
 
-    b_min_x = max(min_x, cx - radius)
-    b_max_x = min(max_x, cx + radius)
-    b_min_y = max(min_y, cy - radius)
-    b_max_y = min(max_y, cy + radius)
+    c_idx = cy * width + cx
+    center_l = lab[c_idx * 3]
+    center_a = lab[c_idx * 3 + 1]
+    center_b = lab[c_idx * 3 + 2]
+
+    # Sample core seeds tightly around cursor center, filtered by center color & edge barrier
+    core_r = max(2, int(radius * 0.35))
+    sq_core_r = core_r * core_r
+    sq_core_tol = (tol * 0.65) ** 2
 
     sum_l, sum_a, sum_b = 0.0, 0.0, 0.0
-    seeds = []
-    for gy in range(b_min_y, b_max_y + 1):
-        dy = gy - cy
-        row = gy * width
-        for gx in range(b_min_x, b_max_x + 1):
-            dx = gx - cx
-            if dx * dx + dy * dy <= sq_r:
-                idx = row + gx
-                lab_idx = idx * 3
-                sum_l += lab[lab_idx]
-                sum_a += lab[lab_idx + 1]
-                sum_b += lab[lab_idx + 2]
-                seeds.append((gx, gy, idx))
+    core_seeds = []
+    for dy in range(-core_r, core_r + 1):
+        gy = cy + dy
+        if 0 <= gy < height:
+            row = gy * width
+            for dx in range(-core_r, core_r + 1):
+                gx = cx + dx
+                if 0 <= gx < width and dx*dx + dy*dy <= sq_core_r:
+                    idx = row + gx
+                    lab_idx = idx * 3
+                    nl = lab[lab_idx]
+                    na = lab[lab_idx + 1]
+                    nb = lab[lab_idx + 2]
+                    d_c2 = (nl - center_l)**2 + (na - center_a)**2 + (nb - center_b)**2
+                    if d_c2 <= sq_core_tol and grad[idx] < barrier:
+                        sum_l += nl
+                        sum_a += na
+                        sum_b += nb
+                        core_seeds.append((gx, gy, idx))
 
-    if not seeds:
-        return None
+    if not core_seeds:
+        core_seeds.append((cx, cy, c_idx))
+        ref_l, ref_a, ref_b = center_l, center_a, center_b
+    else:
+        cnt = len(core_seeds)
+        ref_l = sum_l / cnt
+        ref_a = sum_a / cnt
+        ref_b = sum_b / cnt
 
-    if is_sub:
-        for gx, gy, idx in seeds:
-            mask[idx] = 0
-        return (b_min_x, b_min_y, b_max_x, b_max_y)
-
-    cnt = len(seeds)
-    ref_l = sum_l / cnt
-    ref_a = sum_a / cnt
-    ref_b = sum_b / cnt
-
+    target_val = 0 if is_sub else 255
     queue = deque()
     visited = set()
-    for gx, gy, idx in seeds:
-        mask[idx] = 255
+    for gx, gy, idx in core_seeds:
+        mask[idx] = target_val
         visited.add(idx)
         queue.append((gx, gy, idx))
 
@@ -465,7 +472,8 @@ def apply_wavefront_brush(mask, lab, grad, width, height, cx, cy, radius, tol, r
                 dx = nx - cx
                 dy = ny - cy
                 if dx * dx + dy * dy <= sq_reach:
-                    if grad[n_idx] <= barrier:
+                    # Halt expansion at contrast boundary barrier
+                    if grad[curr_idx] < barrier and grad[n_idx] < barrier:
                         nl = lab[n_idx * 3]
                         na = lab[n_idx * 3 + 1]
                         nb = lab[n_idx * 3 + 2]
@@ -473,18 +481,17 @@ def apply_wavefront_brush(mask, lab, grad, width, height, cx, cy, radius, tol, r
                         da = ref_a - na
                         db = ref_b - nb
                         if dl * dl + da * da + db * db <= sq_tol:
-                            mask[n_idx] = 255
+                            mask[n_idx] = target_val
                             queue.append((nx, ny, n_idx))
 
     return (min_x, min_y, max_x, max_y)
 
 
 # ============================================================================
-# Engine 3: Geodesic Ridge (Gradient Ridge Distance)
+# Engine 3: Geodesic Ridge (Gradient Ridge Distance - Core Seeded)
 # ============================================================================
 
 def apply_geodesic_brush(mask, lab, grad, width, height, cx, cy, radius, reach, barrier, is_sub):
-    sq_r = radius * radius
     max_reach = int(radius * reach)
     sq_reach = max_reach * max_reach
 
@@ -493,37 +500,38 @@ def apply_geodesic_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
     min_y = max(0, cy - max_reach)
     max_y = min(height - 1, cy + max_reach)
 
-    b_min_x = max(min_x, cx - radius)
-    b_max_x = min(max_x, cx + radius)
-    b_min_y = max(min_y, cy - radius)
-    b_max_y = min(max_y, cy + radius)
+    c_idx = cy * width + cx
+    center_l = lab[c_idx * 3]
+    center_a = lab[c_idx * 3 + 1]
+    center_b = lab[c_idx * 3 + 2]
 
-    seeds = []
-    for gy in range(b_min_y, b_max_y + 1):
-        dy = gy - cy
-        row = gy * width
-        for gx in range(b_min_x, b_max_x + 1):
-            dx = gx - cx
-            if dx * dx + dy * dy <= sq_r:
-                idx = row + gx
-                seeds.append((gx, gy, idx))
+    core_r = max(2, int(radius * 0.35))
+    sq_core_r = core_r * core_r
 
-    if not seeds:
-        return None
+    core_seeds = []
+    for dy in range(-core_r, core_r + 1):
+        gy = cy + dy
+        if 0 <= gy < height:
+            row = gy * width
+            for dx in range(-core_r, core_r + 1):
+                gx = cx + dx
+                if 0 <= gx < width and dx*dx + dy*dy <= sq_core_r:
+                    idx = row + gx
+                    if grad[idx] < barrier:
+                        core_seeds.append((gx, gy, idx))
 
-    if is_sub:
-        for gx, gy, idx in seeds:
-            mask[idx] = 0
-        return (b_min_x, b_min_y, b_max_x, b_max_y)
+    if not core_seeds:
+        core_seeds.append((cx, cy, c_idx))
 
+    target_val = 0 if is_sub else 255
     queue = deque()
     geo_cost = {}
-    for gx, gy, idx in seeds:
-        mask[idx] = 255
+    for gx, gy, idx in core_seeds:
+        mask[idx] = target_val
         geo_cost[idx] = 0.0
         queue.append((gx, gy, idx))
 
-    max_geo_cost = barrier * 1.5
+    max_geo_cost = barrier * 1.6
     while queue:
         px, py, curr_idx = queue.popleft()
         curr_cost = geo_cost[curr_idx]
@@ -548,18 +556,17 @@ def apply_geodesic_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
                     if next_cost < max_geo_cost:
                         if n_idx not in geo_cost or next_cost < geo_cost[n_idx]:
                             geo_cost[n_idx] = next_cost
-                            mask[n_idx] = 255
+                            mask[n_idx] = target_val
                             queue.append((nx, ny, n_idx))
 
     return (min_x, min_y, max_x, max_y)
 
 
 # ============================================================================
-# Engine 4: Adaptive Variance Band (Affinity Photo Style)
+# Engine 4: Adaptive Variance Band (Affinity Photo Style - Core Seeded)
 # ============================================================================
 
 def apply_variance_brush(mask, lab, grad, width, height, cx, cy, radius, reach, tol, is_sub):
-    sq_r = radius * radius
     max_reach = int(radius * reach)
     sq_reach = max_reach * max_reach
 
@@ -568,55 +575,60 @@ def apply_variance_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
     min_y = max(0, cy - max_reach)
     max_y = min(height - 1, cy + max_reach)
 
-    b_min_x = max(min_x, cx - radius)
-    b_max_x = min(max_x, cx + radius)
-    b_min_y = max(min_y, cy - radius)
-    b_max_y = min(max_y, cy + radius)
+    c_idx = cy * width + cx
+    center_l = lab[c_idx * 3]
+    center_a = lab[c_idx * 3 + 1]
+    center_b = lab[c_idx * 3 + 2]
+
+    core_r = max(2, int(radius * 0.35))
+    sq_core_r = core_r * core_r
 
     seeds = []
     sum_l, sum_a, sum_b = 0.0, 0.0, 0.0
-    for gy in range(b_min_y, b_max_y + 1):
-        dy = gy - cy
-        row = gy * width
-        for gx in range(b_min_x, b_max_x + 1):
-            dx = gx - cx
-            if dx * dx + dy * dy <= sq_r:
-                idx = row + gx
-                lab_idx = idx * 3
-                sum_l += lab[lab_idx]
-                sum_a += lab[lab_idx + 1]
-                sum_b += lab[lab_idx + 2]
-                seeds.append((gx, gy, idx))
+    for dy in range(-core_r, core_r + 1):
+        gy = cy + dy
+        if 0 <= gy < height:
+            row = gy * width
+            for dx in range(-core_r, core_r + 1):
+                gx = cx + dx
+                if 0 <= gx < width and dx*dx + dy*dy <= sq_core_r:
+                    idx = row + gx
+                    lab_idx = idx * 3
+                    nl = lab[lab_idx]
+                    na = lab[lab_idx + 1]
+                    nb = lab[lab_idx + 2]
+                    sum_l += nl
+                    sum_a += na
+                    sum_b += nb
+                    seeds.append((gx, gy, idx))
 
     if not seeds:
-        return None
+        seeds.append((cx, cy, c_idx))
+        mean_l, mean_a, mean_b = center_l, center_a, center_b
+        std_l, std_a, std_b = 4.0, 3.0, 3.0
+    else:
+        cnt = len(seeds)
+        mean_l = sum_l / cnt
+        mean_a = sum_a / cnt
+        mean_b = sum_b / cnt
 
-    if is_sub:
-        for gx, gy, idx in seeds:
-            mask[idx] = 0
-        return (b_min_x, b_min_y, b_max_x, b_max_y)
+        var_l = sum((lab[s[2]*3] - mean_l)**2 for s in seeds) / cnt
+        var_a = sum((lab[s[2]*3+1] - mean_a)**2 for s in seeds) / cnt
+        var_b = sum((lab[s[2]*3+2] - mean_b)**2 for s in seeds) / cnt
 
-    cnt = len(seeds)
-    mean_l = sum_l / cnt
-    mean_a = sum_a / cnt
-    mean_b = sum_b / cnt
-
-    var_l = sum((lab[s[2]*3] - mean_l)**2 for s in seeds) / cnt
-    var_a = sum((lab[s[2]*3+1] - mean_a)**2 for s in seeds) / cnt
-    var_b = sum((lab[s[2]*3+2] - mean_b)**2 for s in seeds) / cnt
-
-    std_l = max(3.0, math.sqrt(var_l))
-    std_a = max(2.0, math.sqrt(var_a))
-    std_b = max(2.0, math.sqrt(var_b))
+        std_l = max(3.0, math.sqrt(var_l))
+        std_a = max(2.0, math.sqrt(var_a))
+        std_b = max(2.0, math.sqrt(var_b))
 
     thresh_l = std_l * (tol / 10.0)
     thresh_a = std_a * (tol / 10.0)
     thresh_b = std_b * (tol / 10.0)
 
+    target_val = 0 if is_sub else 255
     queue = deque()
     visited = set()
     for gx, gy, idx in seeds:
-        mask[idx] = 255
+        mask[idx] = target_val
         visited.add(idx)
         queue.append((gx, gy, idx))
 
@@ -642,7 +654,7 @@ def apply_variance_brush(mask, lab, grad, width, height, cx, cy, radius, reach, 
                     na = lab[n_idx * 3 + 1]
                     nb = lab[n_idx * 3 + 2]
                     if abs(nl - mean_l) <= thresh_l and abs(na - mean_a) <= thresh_a and abs(nb - mean_b) <= thresh_b:
-                        mask[n_idx] = 255
+                        mask[n_idx] = target_val
                         queue.append((nx, ny, n_idx))
 
     return (min_x, min_y, max_x, max_y)
@@ -918,7 +930,7 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         # Footer hints
         footer_box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 8)
-        self.foot_hint = Gtk.Label.new(_("🎯 Adaptive Wavefront Active: Snaps accurately to pixel-level silhouettes and fine contours."))
+        self.foot_hint = Gtk.Label.new(_("🎯 Adaptive Wavefront Active: Core-seeded edge barrier snapping."))
         self.foot_hint.set_alignment(0.0, 0.5)
         footer_box.pack_start(self.foot_hint, True, True, 0)
 
@@ -953,7 +965,7 @@ class QuickSelectionDialog(Gtk.Dialog):
         algo_box.pack_start(self.combo_algo, False, False, 0)
 
         self.lbl_algo_desc = Gtk.Label.new(
-            _("Best for sharp silhouettes, line art, hair strands, and fine contours. Evaluates exact pixel edges.")
+            _("Best for sharp silhouettes, line art, hair strands, and fine contours. Core-seeded edge barrier expansion.")
         )
         self.lbl_algo_desc.set_line_wrap(True)
         self.lbl_algo_desc.set_alignment(0.0, 0.5)
@@ -1080,9 +1092,9 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         if self.active_algorithm == "wavefront":
             self.lbl_algo_desc.set_text(
-                _("🎯 Best for sharp silhouettes, line art, hair strands, and fine contours. Evaluates exact pixel edges.")
+                _("🎯 Best for sharp silhouettes, line art, hair strands, and fine contours. Core-seeded edge barrier expansion.")
             )
-            self.foot_hint.set_text(_("🎯 Adaptive Wavefront Active: Pixel-level edge barrier snapping."))
+            self.foot_hint.set_text(_("🎯 Adaptive Wavefront Active: Core-seeded edge barrier snapping."))
             self.scale_reach.set_value(1.45)
             self.scale_color.set_value(22.0)
             self.scale_barrier.set_value(35.0)
