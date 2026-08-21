@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Lazy Snapping Quick Selection Brush with Zoom & Pan for GIMP 3
-=============================================================
-Implementation of SIGGRAPH Lazy Snapping with interactive Zoom & Pan navigation:
-- Mouse Wheel: Zoom In / Out centered on cursor (10% to 1000%)
-- Middle Click Drag / Right Click Drag / Spacebar + Drag: Smooth Pan
-- Toolbar Zoom Controls: [-], [+], [Fit], [100%]
-- Real-time Lazy Snapping with 99.9% silhouette accuracy
-- Instantaneous C-speed selection application (<0.15s)
+Multi-Algorithm Quick Selection Brush Suite for GIMP 3
+======================================================
+Interactive Quick Selection tool with 4 switchable segmentation engines:
+1. ⚡ Lazy Snapping (Graph Cut + Superpixels) - Best for general objects & textures
+2. 🎯 Adaptive Wavefront (Pixel-Level / Photoshop) - Best for line art, hair & sharp edges
+3. 🌊 Geodesic Ridge (Gradient Distance) - Best for high-contrast silhouettes
+4. 🖌️ Adaptive Variance (Affinity Photo Style) - Best for smooth gradients & shading
+Features real-time Zoom & Pan navigation, custom overlays, and instant application.
 """
 
 import sys
@@ -38,14 +38,49 @@ def _(message):
 
 
 # ============================================================================
-# Color Space Conversion (CIE L*a*b*)
+# Core Image Processing, Gradient & Color Conversion
 # ============================================================================
 
+def compute_sobel_gradient(lum_bytes, width, height, smooth=True):
+    """Computes normalized Sobel gradient magnitude map [0..255] from luminance."""
+    total = width * height
+    grad = bytearray(total)
+    isqrt = math.isqrt
+    src = lum_bytes
+
+    if smooth:
+        blurred = bytearray(total)
+        for y in range(1, height - 1):
+            r_p = (y - 1) * width
+            r_c = y * width
+            r_n = (y + 1) * width
+            for x in range(1, width - 1):
+                s = (
+                    src[r_p + x - 1] + src[r_p + x] + src[r_p + x + 1] +
+                    src[r_c + x - 1] + src[r_c + x] + src[r_c + x + 1] +
+                    src[r_n + x - 1] + src[r_n + x] + src[r_n + x + 1]
+                )
+                blurred[r_c + x] = s // 9
+        src = blurred
+
+    for y in range(1, height - 1):
+        r_p = (y - 1) * width
+        r_c = y * width
+        r_n = (y + 1) * width
+        for x in range(1, width - 1):
+            gx = (src[r_p + x + 1] + (src[r_c + x + 1] << 1) + src[r_n + x + 1]) - \
+                 (src[r_p + x - 1] + (src[r_c + x - 1] << 1) + src[r_n + x - 1])
+            gy = (src[r_n + x - 1] + (src[r_n + x] << 1) + src[r_n + x + 1]) - \
+                 (src[r_p + x - 1] + (src[r_p + x] << 1) + src[r_p + x + 1])
+
+            g = isqrt(gx * gx + gy * gy) >> 2
+            grad[r_c + x] = 255 if g > 255 else g
+
+    return grad
+
+
 def rgb_to_lab_floats(rgba_bytes, width, height):
-    """
-    Converts RGBA u8 bytes into array.array('f') holding CIE L*, a*, b* values.
-    Uses standard D65 illuminant linearization.
-    """
+    """Converts RGBA u8 bytes into array.array('f') holding CIE L*, a*, b* values."""
     total = width * height
     lab = array.array('f', [0.0] * (total * 3))
 
@@ -77,13 +112,10 @@ def rgb_to_lab_floats(rgba_bytes, width, height):
 
 
 # ============================================================================
-# SLIC Super-Regions Over-Segmentation
+# Engine 1: SLIC Super-Regions & Dinic Min-Cut (Lazy Snapping)
 # ============================================================================
 
-def compute_slic(lab_data, width, height, num_superpixels=1000, compactness=16.0, num_iters=3):
-    """
-    Computes fine SLIC super-regions for Lazy Snapping graph representation.
-    """
+def compute_slic(lab_data, width, height, num_superpixels=1100, compactness=16.0, num_iters=3):
     total = width * height
     S = int(math.sqrt(total / num_superpixels))
     S = max(5, S)
@@ -194,10 +226,6 @@ def compute_slic(lab_data, width, height, num_superpixels=1000, compactness=16.0
     return labels, centers, sp_pixels, sp_neighbors
 
 
-# ============================================================================
-# Dinic Max-Flow / Min-Cut Graph Solver
-# ============================================================================
-
 class DinicMaxFlow:
     def __init__(self, num_nodes):
         self.num_nodes = num_nodes
@@ -275,18 +303,14 @@ class DinicMaxFlow:
         return set(i for i in range(self.num_nodes) if visited[i])
 
 
-# ============================================================================
-# Lazy Snapping Engine
-# ============================================================================
-
 def apply_lazy_snapping_brush(
     active_selection,
     fg_brush_nodes,
     sp_centers,
     sp_neighbors,
     num_sp,
-    smoothness_weight=20.0,
-    search_reach=2.4
+    smoothness_weight=22.0,
+    search_reach=2.2
 ):
     if not fg_brush_nodes:
         return active_selection
@@ -369,18 +393,278 @@ def apply_lazy_snapping_brush(
 
 
 # ============================================================================
-# Interactive Quick Selection Dialog with Zoom & Pan Support
+# Engine 2: Adaptive Pixel Wavefront (Photoshop Style)
+# ============================================================================
+
+def apply_wavefront_brush(mask, lab, grad, width, height, cx, cy, radius, tol, reach, barrier, is_sub):
+    sq_r = radius * radius
+    max_reach = int(radius * reach)
+    sq_reach = max_reach * max_reach
+    sq_tol = tol * tol
+
+    min_x = max(0, cx - max_reach)
+    max_x = min(width - 1, cx + max_reach)
+    min_y = max(0, cy - max_reach)
+    max_y = min(height - 1, cy + max_reach)
+
+    b_min_x = max(min_x, cx - radius)
+    b_max_x = min(max_x, cx + radius)
+    b_min_y = max(min_y, cy - radius)
+    b_max_y = min(max_y, cy + radius)
+
+    sum_l, sum_a, sum_b = 0.0, 0.0, 0.0
+    seeds = []
+    for gy in range(b_min_y, b_max_y + 1):
+        dy = gy - cy
+        row = gy * width
+        for gx in range(b_min_x, b_max_x + 1):
+            dx = gx - cx
+            if dx * dx + dy * dy <= sq_r:
+                idx = row + gx
+                lab_idx = idx * 3
+                sum_l += lab[lab_idx]
+                sum_a += lab[lab_idx + 1]
+                sum_b += lab[lab_idx + 2]
+                seeds.append((gx, gy, idx))
+
+    if not seeds:
+        return None
+
+    if is_sub:
+        for gx, gy, idx in seeds:
+            mask[idx] = 0
+        return (b_min_x, b_min_y, b_max_x, b_max_y)
+
+    cnt = len(seeds)
+    ref_l = sum_l / cnt
+    ref_a = sum_a / cnt
+    ref_b = sum_b / cnt
+
+    queue = deque()
+    visited = set()
+    for gx, gy, idx in seeds:
+        mask[idx] = 255
+        visited.add(idx)
+        queue.append((gx, gy, idx))
+
+    while queue:
+        px, py, curr_idx = queue.popleft()
+        neighbors = []
+        if px > min_x:
+            neighbors.append((px - 1, py, curr_idx - 1))
+        if px < max_x:
+            neighbors.append((px + 1, py, curr_idx + 1))
+        if py > min_y:
+            neighbors.append((px, py - 1, curr_idx - width))
+        if py < max_y:
+            neighbors.append((px, py + 1, curr_idx + width))
+
+        for nx, ny, n_idx in neighbors:
+            if n_idx not in visited:
+                visited.add(n_idx)
+                dx = nx - cx
+                dy = ny - cy
+                if dx * dx + dy * dy <= sq_reach:
+                    if grad[n_idx] <= barrier:
+                        nl = lab[n_idx * 3]
+                        na = lab[n_idx * 3 + 1]
+                        nb = lab[n_idx * 3 + 2]
+                        dl = ref_l - nl
+                        da = ref_a - na
+                        db = ref_b - nb
+                        if dl * dl + da * da + db * db <= sq_tol:
+                            mask[n_idx] = 255
+                            queue.append((nx, ny, n_idx))
+
+    return (min_x, min_y, max_x, max_y)
+
+
+# ============================================================================
+# Engine 3: Geodesic Ridge (Gradient Ridge Distance)
+# ============================================================================
+
+def apply_geodesic_brush(mask, lab, grad, width, height, cx, cy, radius, reach, barrier, is_sub):
+    sq_r = radius * radius
+    max_reach = int(radius * reach)
+    sq_reach = max_reach * max_reach
+
+    min_x = max(0, cx - max_reach)
+    max_x = min(width - 1, cx + max_reach)
+    min_y = max(0, cy - max_reach)
+    max_y = min(height - 1, cy + max_reach)
+
+    b_min_x = max(min_x, cx - radius)
+    b_max_x = min(max_x, cx + radius)
+    b_min_y = max(min_y, cy - radius)
+    b_max_y = min(max_y, cy + radius)
+
+    seeds = []
+    for gy in range(b_min_y, b_max_y + 1):
+        dy = gy - cy
+        row = gy * width
+        for gx in range(b_min_x, b_max_x + 1):
+            dx = gx - cx
+            if dx * dx + dy * dy <= sq_r:
+                idx = row + gx
+                seeds.append((gx, gy, idx))
+
+    if not seeds:
+        return None
+
+    if is_sub:
+        for gx, gy, idx in seeds:
+            mask[idx] = 0
+        return (b_min_x, b_min_y, b_max_x, b_max_y)
+
+    queue = deque()
+    geo_cost = {}
+    for gx, gy, idx in seeds:
+        mask[idx] = 255
+        geo_cost[idx] = 0.0
+        queue.append((gx, gy, idx))
+
+    max_geo_cost = barrier * 1.5
+    while queue:
+        px, py, curr_idx = queue.popleft()
+        curr_cost = geo_cost[curr_idx]
+
+        neighbors = []
+        if px > min_x:
+            neighbors.append((px - 1, py, curr_idx - 1))
+        if px < max_x:
+            neighbors.append((px + 1, py, curr_idx + 1))
+        if py > min_y:
+            neighbors.append((px, py - 1, curr_idx - width))
+        if py < max_y:
+            neighbors.append((px, py + 1, curr_idx + width))
+
+        for nx, ny, n_idx in neighbors:
+            dx = nx - cx
+            dy = ny - cy
+            if dx * dx + dy * dy <= sq_reach:
+                step_grad = float(grad[n_idx])
+                if step_grad < barrier:
+                    next_cost = curr_cost + step_grad * 0.25
+                    if next_cost < max_geo_cost:
+                        if n_idx not in geo_cost or next_cost < geo_cost[n_idx]:
+                            geo_cost[n_idx] = next_cost
+                            mask[n_idx] = 255
+                            queue.append((nx, ny, n_idx))
+
+    return (min_x, min_y, max_x, max_y)
+
+
+# ============================================================================
+# Engine 4: Adaptive Variance Band (Affinity Photo Style)
+# ============================================================================
+
+def apply_variance_brush(mask, lab, grad, width, height, cx, cy, radius, reach, tol, is_sub):
+    sq_r = radius * radius
+    max_reach = int(radius * reach)
+    sq_reach = max_reach * max_reach
+
+    min_x = max(0, cx - max_reach)
+    max_x = min(width - 1, cx + max_reach)
+    min_y = max(0, cy - max_reach)
+    max_y = min(height - 1, cy + max_reach)
+
+    b_min_x = max(min_x, cx - radius)
+    b_max_x = min(max_x, cx + radius)
+    b_min_y = max(min_y, cy - radius)
+    b_max_y = min(max_y, cy + radius)
+
+    seeds = []
+    sum_l, sum_a, sum_b = 0.0, 0.0, 0.0
+    for gy in range(b_min_y, b_max_y + 1):
+        dy = gy - cy
+        row = gy * width
+        for gx in range(b_min_x, b_max_x + 1):
+            dx = gx - cx
+            if dx * dx + dy * dy <= sq_r:
+                idx = row + gx
+                lab_idx = idx * 3
+                sum_l += lab[lab_idx]
+                sum_a += lab[lab_idx + 1]
+                sum_b += lab[lab_idx + 2]
+                seeds.append((gx, gy, idx))
+
+    if not seeds:
+        return None
+
+    if is_sub:
+        for gx, gy, idx in seeds:
+            mask[idx] = 0
+        return (b_min_x, b_min_y, b_max_x, b_max_y)
+
+    cnt = len(seeds)
+    mean_l = sum_l / cnt
+    mean_a = sum_a / cnt
+    mean_b = sum_b / cnt
+
+    var_l = sum((lab[s[2]*3] - mean_l)**2 for s in seeds) / cnt
+    var_a = sum((lab[s[2]*3+1] - mean_a)**2 for s in seeds) / cnt
+    var_b = sum((lab[s[2]*3+2] - mean_b)**2 for s in seeds) / cnt
+
+    std_l = max(3.0, math.sqrt(var_l))
+    std_a = max(2.0, math.sqrt(var_a))
+    std_b = max(2.0, math.sqrt(var_b))
+
+    thresh_l = std_l * (tol / 10.0)
+    thresh_a = std_a * (tol / 10.0)
+    thresh_b = std_b * (tol / 10.0)
+
+    queue = deque()
+    visited = set()
+    for gx, gy, idx in seeds:
+        mask[idx] = 255
+        visited.add(idx)
+        queue.append((gx, gy, idx))
+
+    while queue:
+        px, py, curr_idx = queue.popleft()
+        neighbors = []
+        if px > min_x:
+            neighbors.append((px - 1, py, curr_idx - 1))
+        if px < max_x:
+            neighbors.append((px + 1, py, curr_idx + 1))
+        if py > min_y:
+            neighbors.append((px, py - 1, curr_idx - width))
+        if py < max_y:
+            neighbors.append((px, py + 1, curr_idx + width))
+
+        for nx, ny, n_idx in neighbors:
+            if n_idx not in visited:
+                visited.add(n_idx)
+                dx = nx - cx
+                dy = ny - cy
+                if dx * dx + dy * dy <= sq_reach:
+                    nl = lab[n_idx * 3]
+                    na = lab[n_idx * 3 + 1]
+                    nb = lab[n_idx * 3 + 2]
+                    if abs(nl - mean_l) <= thresh_l and abs(na - mean_a) <= thresh_a and abs(nb - mean_b) <= thresh_b:
+                        mask[n_idx] = 255
+                        queue.append((nx, ny, n_idx))
+
+    return (min_x, min_y, max_x, max_y)
+
+
+# ============================================================================
+# Interactive Quick Selection Dialog with Multi-Algorithm Suite
 # ============================================================================
 
 class QuickSelectionDialog(Gtk.Dialog):
     def __init__(self, image, drawable):
-        super().__init__(title=_("Quick Selection Brush (Edge-Aware)"), modal=True)
-        self.set_default_size(1080, 760)
+        super().__init__(title=_("Quick Selection Brush Suite (Edge-Aware)"), modal=True)
+        self.set_default_size(1100, 780)
 
         self.image = image
         self.drawable = drawable
         self.orig_width = drawable.get_width()
         self.orig_height = drawable.get_height()
+
+        # Active Algorithm Engine:
+        # "lazy_snapping" | "wavefront" | "geodesic" | "variance"
+        self.active_algorithm = "wavefront"
 
         # Viewport Navigation State (Zoom & Pan)
         self.zoom_scale = 1.0
@@ -399,10 +683,12 @@ class QuickSelectionDialog(Gtk.Dialog):
         self.cursor_screen_y = -100
         self.current_stroke_seeds = set()
 
-        # Lazy Snapping Parameters
-        self.brush_size = 20
+        # Parameters
+        self.brush_size = 22
+        self.snap_reach = 1.45
+        self.color_tolerance = 22.0
+        self.edge_barrier = 35
         self.smoothness_weight = 22.0
-        self.snap_reach = 2.2
         self.selection_mode = "add"  # "add", "subtract", "replace"
 
         # Selection Overlay Color (Default Cyan 50% opacity)
@@ -411,7 +697,7 @@ class QuickSelectionDialog(Gtk.Dialog):
         self.overlay_b = 1.0
         self.overlay_a = 0.50
 
-        # Selected supernodes set
+        # Selected supernodes set for Lazy Snapping
         self.selected_superpixels = set()
 
         # History stack for Undo
@@ -430,7 +716,7 @@ class QuickSelectionDialog(Gtk.Dialog):
         self._refresh_full_preview()
 
     def _prepare_buffers(self):
-        """Prepares thumbnail buffers and computes SLIC super-regions."""
+        """Prepares thumbnail buffers and computes SLIC super-regions and gradients."""
         max_dim = 640
         if self.orig_width > self.orig_height:
             self.prev_w = min(max_dim, self.orig_width)
@@ -461,7 +747,7 @@ class QuickSelectionDialog(Gtk.Dialog):
         )
         self.comp_rgba = bytearray(self.bg_rgba)
 
-        # 3. Lab conversion
+        # 3. Lab and Luminance conversion
         try:
             lab_thumb_raw = self.drawable_buf.get(rect_prev, self.scale_x, "CIE Lab float", Gegl.AbyssPolicy.CLAMP)
             self.thumb_lab = array.array('f')
@@ -469,9 +755,12 @@ class QuickSelectionDialog(Gtk.Dialog):
         except Exception:
             self.thumb_lab = rgb_to_lab_floats(self.bg_rgba, self.prev_w, self.prev_h)
 
-        # 4. SLIC Superpixels Preprocessing
+        self.thumb_lum = self.drawable_buf.get(rect_prev, self.scale_x, "Y u8", Gegl.AbyssPolicy.CLAMP)
+        self.thumb_grad = compute_sobel_gradient(self.thumb_lum, self.prev_w, self.prev_h, smooth=True)
+
+        # 4. SLIC Superpixels Preprocessing for Lazy Snapping
         self.sp_labels, self.sp_centers, self.sp_pixels, self.sp_neighbors = compute_slic(
-            self.thumb_lab, self.prev_w, self.prev_h, num_superpixels=1200, compactness=16.0, num_iters=3
+            self.thumb_lab, self.prev_w, self.prev_h, num_superpixels=1100, compactness=16.0, num_iters=3
         )
         self.num_sp = len(self.sp_centers)
 
@@ -482,7 +771,7 @@ class QuickSelectionDialog(Gtk.Dialog):
                 if sel_count >= len(sp_px_list) // 2:
                     self.selected_superpixels.add(sp_id)
 
-        self.history_stack.append(set(self.selected_superpixels))
+        self.history_stack.append(bytearray(self.thumb_mask))
 
     def _build_ui(self):
         # Streamlined 2-button dialog: Cancel and Apply Selection (OK)
@@ -495,7 +784,7 @@ class QuickSelectionDialog(Gtk.Dialog):
         root.set_border_width(12)
 
         # ====================================================================
-        # TOP TOOLBAR: Selection Mode + Brush Size + Zoom Controls + Undo/Clear
+        # TOP TOOLBAR: Mode + Brush Size + Zoom Controls + Undo / Clear
         # ====================================================================
         top_bar = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 8)
         root.pack_start(top_bar, False, False, 0)
@@ -510,7 +799,7 @@ class QuickSelectionDialog(Gtk.Dialog):
         box_add.pack_start(Gtk.Image.new_from_icon_name("list-add", Gtk.IconSize.BUTTON), False, False, 0)
         box_add.pack_start(Gtk.Label.new(_("Add (+)")), False, False, 0)
         self.btn_mode_add.add(box_add)
-        self.btn_mode_add.set_tooltip_text(_("Paint over objects to snap them into selection"))
+        self.btn_mode_add.set_tooltip_text(_("Paint over objects to add them to selection"))
         self.btn_mode_add.connect("toggled", self._on_mode_toggled, "add")
         mode_box.pack_start(self.btn_mode_add, False, False, 0)
 
@@ -549,7 +838,7 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         top_bar.pack_start(Gtk.Separator.new(Gtk.Orientation.VERTICAL), False, False, 2)
 
-        # Zoom Controls in Toolbar
+        # Zoom Controls
         zoom_box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 3)
         top_bar.pack_start(zoom_box, False, False, 0)
 
@@ -589,7 +878,7 @@ class QuickSelectionDialog(Gtk.Dialog):
         top_bar.pack_end(btn_clear, False, False, 0)
 
         # ====================================================================
-        # MAIN AREA: Left (Canvas) + Right (Controls)
+        # MAIN AREA: Left (Canvas) + Right (Controls & Multi-Algorithm Suite)
         # ====================================================================
         main_box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 16)
         root.pack_start(main_box, True, True, 0)
@@ -629,9 +918,9 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         # Footer hints
         footer_box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 8)
-        foot_hint = Gtk.Label.new(_("🔍 Scroll Wheel: Zoom | Middle-Drag / Space+Drag: Pan | Left-Drag: Paint Selection"))
-        foot_hint.set_alignment(0.0, 0.5)
-        footer_box.pack_start(foot_hint, True, True, 0)
+        self.foot_hint = Gtk.Label.new(_("🎯 Adaptive Wavefront Active: Snaps accurately to pixel-level silhouettes and fine contours."))
+        self.foot_hint.set_alignment(0.0, 0.5)
+        footer_box.pack_start(self.foot_hint, True, True, 0)
 
         self.info_label = Gtk.Label.new(
             _("{w}x{h} px").format(w=self.orig_width, h=self.orig_height)
@@ -642,17 +931,43 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         # RIGHT CONTROLS
         right_box = Gtk.Box.new(Gtk.Orientation.VERTICAL, 10)
-        right_box.set_size_request(330, -1)
+        right_box.set_size_request(340, -1)
         main_box.pack_start(right_box, False, False, 0)
 
-        # 1. Overlay Color & Visuals Frame
+        # ====================================================================
+        # 1. ALGORITHM ENGINE SELECTOR FRAME
+        # ====================================================================
+        algo_frame = Gtk.Frame.new(_("⚙️ Selection Algorithm Engine"))
+        right_box.pack_start(algo_frame, False, False, 0)
+        algo_box = Gtk.Box.new(Gtk.Orientation.VERTICAL, 6)
+        algo_box.set_border_width(8)
+        algo_frame.add(algo_box)
+
+        self.combo_algo = Gtk.ComboBoxText.new()
+        self.combo_algo.append("wavefront", _("🎯 Adaptive Wavefront (Photoshop Style)"))
+        self.combo_algo.append("lazy_snapping", _("⚡ Lazy Snapping (Graph Cut + Superpixels)"))
+        self.combo_algo.append("geodesic", _("🌊 Geodesic Ridge (Sharp Contrast Edge)"))
+        self.combo_algo.append("variance", _("🖌️ Adaptive Variance (Affinity Photo Style)"))
+        self.combo_algo.set_active_id("wavefront")
+        self.combo_algo.connect("changed", self._on_algorithm_changed)
+        algo_box.pack_start(self.combo_algo, False, False, 0)
+
+        self.lbl_algo_desc = Gtk.Label.new(
+            _("Best for sharp silhouettes, line art, hair strands, and fine contours. Evaluates exact pixel edges.")
+        )
+        self.lbl_algo_desc.set_line_wrap(True)
+        self.lbl_algo_desc.set_alignment(0.0, 0.5)
+        algo_box.pack_start(self.lbl_algo_desc, False, False, 0)
+
+        # ====================================================================
+        # 2. SELECTION PREVIEW OVERLAY FRAME
+        # ====================================================================
         color_frame = Gtk.Frame.new(_("Selection Preview Overlay"))
         right_box.pack_start(color_frame, False, False, 0)
         color_box = Gtk.Box.new(Gtk.Orientation.VERTICAL, 6)
         color_box.set_border_width(8)
         color_frame.add(color_box)
 
-        # Color picker row with preset swatches
         swatch_row = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 6)
         color_box.pack_start(swatch_row, False, False, 0)
 
@@ -695,45 +1010,58 @@ class QuickSelectionDialog(Gtk.Dialog):
         self.scale_opacity.connect("value-changed", self._on_opacity_changed)
         color_box.pack_start(self.scale_opacity, False, False, 0)
 
-        # 2. Snapping Controls Frame
-        tune_frame = Gtk.Frame.new(_("Lazy Snapping Tuning"))
+        # ====================================================================
+        # 3. TUNING CONTROLS FRAME
+        # ====================================================================
+        tune_frame = Gtk.Frame.new(_("Snapping & Sensitivity Controls"))
         right_box.pack_start(tune_frame, False, False, 0)
         tune_box = Gtk.Box.new(Gtk.Orientation.VERTICAL, 6)
         tune_box.set_border_width(8)
         tune_frame.add(tune_box)
 
-        # Snap Reach Multiplier
-        tune_box.pack_start(Gtk.Label.new(_("Snapping Reach:")), False, False, 0)
-        self.scale_reach = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1.2, 3.5, 0.1)
+        # Snapping Reach Slider
+        tune_box.pack_start(Gtk.Label.new(_("Snapping Reach (Brush Multiplier):")), False, False, 0)
+        self.scale_reach = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1.0, 3.5, 0.05)
         self.scale_reach.set_value(self.snap_reach)
         self.scale_reach.set_value_pos(Gtk.PositionType.RIGHT)
+        self.scale_reach.set_tooltip_text(_("Controls how far beyond the brush stroke the selection explores"))
         self.scale_reach.connect("value-changed", self._on_reach_changed)
         tune_box.pack_start(self.scale_reach, False, False, 0)
 
-        # Edge Smoothness Weight
-        tune_box.pack_start(Gtk.Label.new(_("Edge Snap Strength (Prior Weight):")), False, False, 0)
-        self.scale_smooth = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 5.0, 60.0, 1.0)
-        self.scale_smooth.set_value(self.smoothness_weight)
-        self.scale_smooth.set_value_pos(Gtk.PositionType.RIGHT)
-        self.scale_smooth.connect("value-changed", self._on_smooth_changed)
-        tune_box.pack_start(self.scale_smooth, False, False, 0)
+        # Color Tolerance Slider
+        self.lbl_tol = Gtk.Label.new(_("Color Tolerance (ΔE):"))
+        tune_box.pack_start(self.lbl_tol, False, False, 0)
+        self.scale_color = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 5.0, 60.0, 1.0)
+        self.scale_color.set_value(self.color_tolerance)
+        self.scale_color.set_value_pos(Gtk.PositionType.RIGHT)
+        self.scale_color.connect("value-changed", self._on_tolerance_changed)
+        tune_box.pack_start(self.scale_color, False, False, 0)
 
-        # Presets
+        # Edge Barrier Strictness Slider
+        self.lbl_barrier = Gtk.Label.new(_("Edge Barrier Strictness:"))
+        tune_box.pack_start(self.lbl_barrier, False, False, 0)
+        self.scale_barrier = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 10.0, 80.0, 1.0)
+        self.scale_barrier.set_value(self.edge_barrier)
+        self.scale_barrier.set_value_pos(Gtk.PositionType.RIGHT)
+        self.scale_barrier.connect("value-changed", self._on_barrier_changed)
+        tune_box.pack_start(self.scale_barrier, False, False, 0)
+
+        # Quick Presets
         preset_box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 6)
         tune_box.pack_start(preset_box, False, False, 4)
-        btn_p1 = Gtk.Button.new_with_label(_("Tight"))
-        btn_p1.set_tooltip_text(_("1.5x reach for precise fine detail"))
-        btn_p1.connect("clicked", lambda b: self._apply_preset(1.5, 30.0))
+        btn_p1 = Gtk.Button.new_with_label(_("Precise"))
+        btn_p1.set_tooltip_text(_("Tight reach and strict edge barrier for fine detail"))
+        btn_p1.connect("clicked", lambda b: self._apply_preset(1.15, 14.0, 25))
         preset_box.pack_start(btn_p1, True, True, 0)
 
         btn_p2 = Gtk.Button.new_with_label(_("Balanced"))
-        btn_p2.set_tooltip_text(_("2.2x reach for standard edge snapping"))
-        btn_p2.connect("clicked", lambda b: self._apply_preset(2.2, 22.0))
+        btn_p2.set_tooltip_text(_("Standard balanced edge-aware snapping"))
+        btn_p2.connect("clicked", lambda b: self._apply_preset(1.45, 22.0, 35))
         preset_box.pack_start(btn_p2, True, True, 0)
 
-        btn_p3 = Gtk.Button.new_with_label(_("Expansive"))
-        btn_p3.set_tooltip_text(_("3.0x reach for filling entire objects quickly"))
-        btn_p3.connect("clicked", lambda b: self._apply_preset(3.0, 15.0))
+        btn_p3 = Gtk.Button.new_with_label(_("Broad"))
+        btn_p3.set_tooltip_text(_("Wide reach for quickly filling larger areas"))
+        btn_p3.connect("clicked", lambda b: self._apply_preset(2.2, 35.0, 50))
         preset_box.pack_start(btn_p3, True, True, 0)
 
         # Status & Pixel Count
@@ -742,6 +1070,47 @@ class QuickSelectionDialog(Gtk.Dialog):
         right_box.pack_end(self.status_label, False, False, 0)
 
         self.show_all()
+
+    # ========================================================================
+    # Algorithm Suite Switching
+    # ========================================================================
+
+    def _on_algorithm_changed(self, combo):
+        self.active_algorithm = combo.get_active_id()
+
+        if self.active_algorithm == "wavefront":
+            self.lbl_algo_desc.set_text(
+                _("🎯 Best for sharp silhouettes, line art, hair strands, and fine contours. Evaluates exact pixel edges.")
+            )
+            self.foot_hint.set_text(_("🎯 Adaptive Wavefront Active: Pixel-level edge barrier snapping."))
+            self.scale_reach.set_value(1.45)
+            self.scale_color.set_value(22.0)
+            self.scale_barrier.set_value(35.0)
+
+        elif self.active_algorithm == "lazy_snapping":
+            self.lbl_algo_desc.set_text(
+                _("⚡ Best for complex photo textures, general objects, and natural images via global graph cut.")
+            )
+            self.foot_hint.set_text(_("⚡ Lazy Snapping Active: Superpixel Graph Cut energy minimization."))
+            self.scale_reach.set_value(2.2)
+            self.scale_color.set_value(25.0)
+            self.scale_barrier.set_value(22.0)
+
+        elif self.active_algorithm == "geodesic":
+            self.lbl_algo_desc.set_text(
+                _("🌊 Best for high-contrast boundaries and solid silhouettes. Halts at strong gradient ridges.")
+            )
+            self.foot_hint.set_text(_("🌊 Geodesic Ridge Active: Gradient accumulation halting at sharp edge ridges."))
+            self.scale_reach.set_value(1.6)
+            self.scale_barrier.set_value(35.0)
+
+        elif self.active_algorithm == "variance":
+            self.lbl_algo_desc.set_text(
+                _("🖌️ Best for smooth gradient shading and controlled touchups (Affinity Photo Style).")
+            )
+            self.foot_hint.set_text(_("🖌️ Adaptive Variance Active: Local statistical Gaussian color distribution."))
+            self.scale_reach.set_value(1.35)
+            self.scale_color.set_value(20.0)
 
     # ========================================================================
     # Zoom & Pan Coordinate Transformation
@@ -863,13 +1232,48 @@ class QuickSelectionDialog(Gtk.Dialog):
         self._update_status()
         self.drawing_area.queue_draw()
 
+    def _refresh_local_preview(self, min_x, min_y, max_x, max_y):
+        """High-speed localized alpha compositing for real-time brush dragging."""
+        r_tint = int(self.overlay_r * 255 * self.overlay_a)
+        g_tint = int(self.overlay_g * 255 * self.overlay_a)
+        b_tint = int(self.overlay_b * 255 * self.overlay_a)
+        inv_a = 1.0 - self.overlay_a
+        w = self.prev_w
+
+        for y in range(min_y, max_y + 1):
+            row = y * w
+            for x in range(min_x, max_x + 1):
+                m_idx = row + x
+                idx = m_idx * 4
+                if self.thumb_mask[m_idx]:
+                    self.comp_rgba[idx] = int(self.bg_rgba[idx] * inv_a + r_tint)
+                    self.comp_rgba[idx + 1] = int(self.bg_rgba[idx + 1] * inv_a + g_tint)
+                    self.comp_rgba[idx + 2] = int(self.bg_rgba[idx + 2] * inv_a + b_tint)
+                else:
+                    self.comp_rgba[idx] = self.bg_rgba[idx]
+                    self.comp_rgba[idx + 1] = self.bg_rgba[idx + 1]
+                    self.comp_rgba[idx + 2] = self.bg_rgba[idx + 2]
+
+        glib_bytes = GLib.Bytes.new(bytes(self.comp_rgba))
+        self.preview_pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(
+            glib_bytes,
+            GdkPixbuf.Colorspace.RGB,
+            True,
+            8,
+            self.prev_w,
+            self.prev_h,
+            self.prev_w * 4
+        )
+        self.drawing_area.queue_draw()
+
     # ========================================================================
     # Fast Painting & Event Handlers
     # ========================================================================
 
-    def _apply_preset(self, reach, smooth):
+    def _apply_preset(self, reach, tol, barrier):
         self.scale_reach.set_value(reach)
-        self.scale_smooth.set_value(smooth)
+        self.scale_color.set_value(tol)
+        self.scale_barrier.set_value(barrier)
 
     def _on_mode_toggled(self, button, mode):
         if button.get_active():
@@ -882,8 +1286,12 @@ class QuickSelectionDialog(Gtk.Dialog):
     def _on_reach_changed(self, scale):
         self.snap_reach = scale.get_value()
 
-    def _on_smooth_changed(self, scale):
-        self.smoothness_weight = scale.get_value()
+    def _on_tolerance_changed(self, scale):
+        self.color_tolerance = scale.get_value()
+
+    def _on_barrier_changed(self, scale):
+        self.edge_barrier = int(scale.get_value())
+        self.smoothness_weight = float(scale.get_value())
 
     def _on_canvas_press(self, widget, event):
         self.event_box.grab_focus()
@@ -905,18 +1313,19 @@ class QuickSelectionDialog(Gtk.Dialog):
             self.current_stroke_seeds.clear()
 
             # Save state before stroke for Undo (capped to 25 items)
-            self.history_stack.append(set(self.selected_superpixels))
+            self.history_stack.append(bytearray(self.thumb_mask))
             if len(self.history_stack) > 25:
                 self.history_stack.pop(0)
 
             # If replace mode, clear selection first
             if self.selection_mode == "replace":
+                self.thumb_mask = bytearray(self.prev_w * self.prev_h)
                 self.selected_superpixels.clear()
                 self.selection_mode = "add"
                 self.btn_mode_add.set_active(True)
+                self._refresh_full_preview()
 
-            self._collect_brush_seeds(img_x, img_y)
-            self._execute_stroke_snapping()
+            self._paint_stroke_step(img_x, img_y)
 
     def _on_canvas_motion(self, widget, event):
         self.cursor_screen_x = event.x
@@ -941,11 +1350,10 @@ class QuickSelectionDialog(Gtk.Dialog):
                 for s in range(1, steps + 1):
                     ix = int(self.last_img_x + (dx * s / steps))
                     iy = int(self.last_img_y + (dy * s / steps))
-                    self._collect_brush_seeds(ix, iy)
+                    self._paint_stroke_step(ix, iy)
 
                 self.last_img_x = curr_img_x
                 self.last_img_y = curr_img_y
-                self._execute_stroke_snapping()
 
         self.drawing_area.queue_draw()
 
@@ -957,6 +1365,7 @@ class QuickSelectionDialog(Gtk.Dialog):
         elif event.button == 1:
             self.is_painting = False
             self.current_stroke_seeds.clear()
+            self._update_status()
             self._refresh_full_preview()
 
     def _on_canvas_leave(self, widget, event):
@@ -964,45 +1373,93 @@ class QuickSelectionDialog(Gtk.Dialog):
         self.cursor_screen_y = -100
         self.drawing_area.queue_draw()
 
-    def _collect_brush_seeds(self, px, py):
-        """Finds supernodes directly underneath the brush circle in image coordinates."""
+    def _paint_stroke_step(self, px, py):
+        """Executes the active segmentation engine at (px, py)."""
         px = max(0, min(self.prev_w - 1, px))
         py = max(0, min(self.prev_h - 1, py))
-        sq_r = self.brush_size * self.brush_size
+        is_sub = (self.selection_mode == "subtract")
 
-        for sp_id in range(self.num_sp):
-            cx, cy = self.sp_centers[sp_id][3], self.sp_centers[sp_id][4]
-            dx = cx - px
-            dy = cy - py
-            if dx * dx + dy * dy <= sq_r:
-                self.current_stroke_seeds.add(sp_id)
-
-    def _execute_stroke_snapping(self):
-        """Runs Lazy Snapping on current stroke seeds."""
-        if not self.current_stroke_seeds:
-            return
-
-        if self.selection_mode == "subtract":
-            for s in self.current_stroke_seeds:
-                self.selected_superpixels.discard(s)
-        else:
-            self.selected_superpixels = apply_lazy_snapping_brush(
-                self.selected_superpixels,
-                self.current_stroke_seeds,
-                self.sp_centers,
-                self.sp_neighbors,
-                self.num_sp,
-                smoothness_weight=self.smoothness_weight,
-                search_reach=self.snap_reach
+        if self.active_algorithm == "wavefront":
+            bbox = apply_wavefront_brush(
+                self.thumb_mask,
+                self.thumb_lab,
+                self.thumb_grad,
+                self.prev_w,
+                self.prev_h,
+                px,
+                py,
+                brush_radius=self.brush_size,
+                tol=self.color_tolerance,
+                reach=self.snap_reach,
+                barrier=self.edge_barrier,
+                is_sub=is_sub
             )
+            if bbox:
+                min_x, min_y, max_x, max_y = bbox
+                self._refresh_local_preview(min_x, min_y, max_x, max_y)
 
-        # Update pixel mask
-        self.thumb_mask = bytearray(self.prev_w * self.prev_h)
-        for sp_id in self.selected_superpixels:
-            for p_idx in self.sp_pixels[sp_id]:
-                self.thumb_mask[p_idx] = 255
+        elif self.active_algorithm == "lazy_snapping":
+            sq_r = self.brush_size * self.brush_size
+            for sp_id in range(self.num_sp):
+                cx, cy = self.sp_centers[sp_id][3], self.sp_centers[sp_id][4]
+                if (cx - px)**2 + (cy - py)**2 <= sq_r:
+                    self.current_stroke_seeds.add(sp_id)
 
-        self._refresh_full_preview()
+            if is_sub:
+                for s in self.current_stroke_seeds:
+                    self.selected_superpixels.discard(s)
+            else:
+                self.selected_superpixels = apply_lazy_snapping_brush(
+                    self.selected_superpixels,
+                    self.current_stroke_seeds,
+                    self.sp_centers,
+                    self.sp_neighbors,
+                    self.num_sp,
+                    smoothness_weight=self.smoothness_weight,
+                    search_reach=self.snap_reach
+                )
+
+            self.thumb_mask = bytearray(self.prev_w * self.prev_h)
+            for sp_id in self.selected_superpixels:
+                for p_idx in self.sp_pixels[sp_id]:
+                    self.thumb_mask[p_idx] = 255
+            self._refresh_full_preview()
+
+        elif self.active_algorithm == "geodesic":
+            bbox = apply_geodesic_brush(
+                self.thumb_mask,
+                self.thumb_lab,
+                self.thumb_grad,
+                self.prev_w,
+                self.prev_h,
+                px,
+                py,
+                brush_radius=self.brush_size,
+                reach=self.snap_reach,
+                barrier=self.edge_barrier,
+                is_sub=is_sub
+            )
+            if bbox:
+                min_x, min_y, max_x, max_y = bbox
+                self._refresh_local_preview(min_x, min_y, max_x, max_y)
+
+        elif self.active_algorithm == "variance":
+            bbox = apply_variance_brush(
+                self.thumb_mask,
+                self.thumb_lab,
+                self.thumb_grad,
+                self.prev_w,
+                self.prev_h,
+                px,
+                py,
+                brush_radius=self.brush_size,
+                reach=self.snap_reach,
+                tol=self.color_tolerance,
+                is_sub=is_sub
+            )
+            if bbox:
+                min_x, min_y, max_x, max_y = bbox
+                self._refresh_local_preview(min_x, min_y, max_x, max_y)
 
     def _update_status(self):
         selected_count = sum(1 for v in self.thumb_mask if v == 255)
@@ -1019,18 +1476,14 @@ class QuickSelectionDialog(Gtk.Dialog):
         """Reverts the last brush stroke."""
         if len(self.history_stack) > 1:
             self.history_stack.pop()
-            self.selected_superpixels = set(self.history_stack[-1])
-            self.thumb_mask = bytearray(self.prev_w * self.prev_h)
-            for sp_id in self.selected_superpixels:
-                for p_idx in self.sp_pixels[sp_id]:
-                    self.thumb_mask[p_idx] = 255
+            self.thumb_mask = bytearray(self.history_stack[-1])
             self._refresh_full_preview()
 
     def _on_clear_clicked(self, btn):
         """Clears selection to empty."""
-        self.history_stack.append(set(self.selected_superpixels))
-        self.selected_superpixels.clear()
+        self.history_stack.append(bytearray(self.thumb_mask))
         self.thumb_mask = bytearray(self.prev_w * self.prev_h)
+        self.selected_superpixels.clear()
         self._refresh_full_preview()
 
     def _on_draw_canvas(self, widget, cr):
@@ -1154,8 +1607,8 @@ class GradientGatedSelectPlugin(Gimp.PlugIn):
             Gimp.ProcedureSensitivityMask.ALWAYS
         )
         procedure.set_documentation(
-            _("Quick Selection Brush (Lazy Snapping)"),
-            _("Interactive edge-aware quick selection brush with Zoom & Pan navigation powered by SIGGRAPH Lazy Snapping."),
+            _("Quick Selection Brush Suite (Edge-Aware)"),
+            _("Multi-algorithm edge-aware quick selection brush featuring Adaptive Wavefront, Lazy Snapping, Geodesic Ridge, and Adaptive Variance engines with Zoom & Pan navigation."),
             name,
         )
         procedure.set_menu_label(_("Quick Selection Brush (Edge-Aware)..."))
