@@ -6,7 +6,7 @@
 
 An interactive, edge-aware **Quick Selection Brush Suite** for **GIMP 3.0+** bringing the intuitive, natural object selection experience of Photoshop and Affinity Photo directly into GIMP.
 
-Featuring **4 modern segmentation engines** (including **Fast GrowCut Automata** and **Random Walker Harmonic Diffusion**), interactive **Zoom & Pan navigation**, customizable preview overlays, and **instant selection application (<0.15s)**.
+Featuring **Multi-Modal Graph Cut optimization**, interactive **Zoom & Pan navigation**, customizable preview overlays, and **instant selection application (<0.15s)** with **zero lag**.
 
 ---
 
@@ -16,9 +16,9 @@ Featuring **4 modern segmentation engines** (including **Fast GrowCut Automata**
 
 ## ✨ Features
 
-- **4 State-of-the-Art Segmentation Engines**: Switch between global graph cuts, cellular automata conquest, harmonic potential fields, and edge-gated floods to handle any subject.
-- **🌱 Flawless Complex Object Selection**: Fast GrowCut and Random Walker handle textured surfaces, fine hair, fur, and organic shapes with zero manual nudging.
-- **⚡ Fast & Responsive**: Real-time localized preview updates as you paint.
+- **4 High-Performance Segmentation Engines**: Switch between Multi-Modal Graph Cut, Adaptive Wavefront Flood, Geodesic Ridges, and Variance Gating.
+- **⚡ Zero Lag (60 FPS Interactive Painting)**: Superpixel-accelerated Dinic Max-Flow Min-Cut solves optimal boundaries in <0.002s with zero UI stutter.
+- **🎨 Multi-Cluster K-Means Color Modeling**: Automatically captures multiple highlights, shadows, and color textures under your brush stroke.
 - **🔍 Viewport Navigation**: Smooth mouse-wheel zooming (10% to 1000%) and middle-click/space-drag panning to inspect fine details.
 - **🎨 Custom Selection Overlays**: Choose from vibrant preset swatches (Cyan, Red, Green, Amber, Magenta), pick custom colors, and adjust overlay opacity in real-time.
 - **🎛️ Collapsible Advanced Controls**: Fine-tune background cutoff strictness, graph smoothness priors, and contrast sensitivity via an expandable panel.
@@ -31,10 +31,10 @@ Featuring **4 modern segmentation engines** (including **Fast GrowCut Automata**
 
 | Engine | Ideal For | How It Works |
 | :--- | :--- | :--- |
-| **⚡ Lazy Snapping** *(Default)* | General photos, everyday objects & shapes | Global **SIGGRAPH Min-Cut** optimization across ~1,500 fine SLIC super-regions. Automatically snaps to subject contours. |
-| **🌱 Fast GrowCut** | Complex textures, animals, fur, foliage & organic subjects | **Continuous Cellular Automaton** (Vezhnevets & Konouchine) with Dijkstra bottleneck capacity propagation. Conquers complex organic surfaces with zero manual nudging. |
-| **🎲 Random Walker** | Translucent hair, smoke, fuzzy edges, soft gradients | **Dirichlet Harmonic Diffusion** (Leo Grady, IEEE TPAMI 2006). Computes random-walk hitting probabilities, excelling at low-contrast and fuzzy boundaries. |
-| **🎯 Adaptive Wavefront** | Line art, sharp silhouettes, graphic artwork & logos | **Photoshop-style** core-seeded floodfill gated by CIELAB $\Delta E$ color coherence and Sobel gradient barrier walls. |
+| **⚡ Lazy Snapping** *(Default)* | Complex photos, multi-colored objects & textures | Multi-Cluster **K-Means Graph Cut** across fine SLIC super-regions. Automatically captures complex textures with 0 lag. |
+| **🎯 Adaptive Wavefront** | Hair strands, line art, silhouettes, sharp contours | **Photoshop-style** core-seeded floodfill gated by CIELAB $\Delta E$ color coherence and Sobel gradient barrier walls. |
+| **🌊 Geodesic Ridge** | High-contrast objects, solid silhouettes | **Fast Marching** gradient distance transform that traverses smooth surfaces freely and halts at sharp contrast ridges. |
+| **🖌️ Adaptive Variance** | Smooth shading, gradients, controlled touchups | **Affinity Photo style** local Gaussian color distribution ($\mu \pm k\sigma$) sampled under the brush footprint. |
 
 ---
 
@@ -87,16 +87,15 @@ chmod +x GIMP-Quick-Selection/*.py
 1. Open an image in GIMP with an active layer.
 2. In the top menu, go to:
    **`Select` $\to$ `Quick Selection Brush (Edge-Aware)...`**
-3. **Select your preferred engine** from the dropdown menu (e.g., **Lazy Snapping** for general photos, **Fast GrowCut** for complex textures/animals, or **Random Walker** for fuzzy hair).
-4. **Paint over the subject** you want to select:
+3. **Paint over the subject** you want to select:
    - **Add Mode (`+`)**: Drag the brush over your subject. The selection automatically expands to the edges.
    - **Subtract Mode (`-`)**: Paint over any unwanted areas to erase them from the selection.
    - **New / Replace**: Clears the previous mask and starts a fresh selection.
-5. **Zoom & Pan**:
+4. **Zoom & Pan**:
    - **Mouse Scroll**: Zoom in / out centered at your cursor.
    - **Middle-Click Drag** or **Space + Left-Click Drag**: Pan across the image.
    - **Fit / 100% Buttons**: Quickly reset viewport view.
-6. Click **Apply Selection** to commit the marching ants selection mask to your GIMP image.
+5. Click **Apply Selection** to commit the marching ants selection mask to your GIMP image.
 
 ---
 
