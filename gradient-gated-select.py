@@ -110,10 +110,10 @@ def compute_multichannel_gradient(lab_data, width, height):
 
 
 # ============================================================================
-# Stage 3: SLIC Superpixel Feature Graph
+# Stage 3: Edge-Aware SLIC Superpixel Feature Graph
 # ============================================================================
 
-def compute_slic(lab_data, grad_data, width, height, num_superpixels=1500, compactness=16.0, num_iters=3):
+def compute_slic(lab_data, grad_data, width, height, num_superpixels=2400, compactness=8.0, num_iters=3):
     total = width * height
     S = int(math.sqrt(total / num_superpixels))
     S = max(4, S)
@@ -121,8 +121,20 @@ def compute_slic(lab_data, grad_data, width, height, num_superpixels=1500, compa
     centers = []
     for y in range(S // 2, height, S):
         for x in range(S // 2, width, S):
-            idx = y * width + x
-            centers.append([lab_data[idx*3], lab_data[idx*3+1], lab_data[idx*3+2], float(x), float(y), grad_data[idx]])
+            best_x, best_y = x, y
+            best_g = grad_data[y * width + x]
+            for dy in (-1, 0, 1):
+                ny = y + dy
+                if 0 <= ny < height:
+                    for dx in (-1, 0, 1):
+                        nx = x + dx
+                        if 0 <= nx < width:
+                            g = grad_data[ny * width + nx]
+                            if g < best_g:
+                                best_g = g
+                                best_x, best_y = nx, ny
+            idx = best_y * width + best_x
+            centers.append([lab_data[idx*3], lab_data[idx*3+1], lab_data[idx*3+2], float(best_x), float(best_y), best_g])
 
     num_centers = len(centers)
     inv_S2 = (compactness / S) ** 2
@@ -200,25 +212,46 @@ def compute_slic(lab_data, grad_data, width, height, num_superpixels=1500, compa
         if k >= 0:
             sp_pixels[k].append(i)
 
-    sp_neighbors = [set() for _ in range(num_centers)]
+    # Build adjacency graph with exact shared-border gradient strength
+    edge_accum = {}
     for y in range(height):
         row = y * width
         for x in range(width - 1):
-            k1 = labels[row + x]
-            k2 = labels[row + x + 1]
+            p1 = row + x
+            p2 = p1 + 1
+            k1 = labels[p1]
+            k2 = labels[p2]
             if k1 != k2 and k1 >= 0 and k2 >= 0:
-                sp_neighbors[k1].add(k2)
-                sp_neighbors[k2].add(k1)
+                key = (k1, k2) if k1 < k2 else (k2, k1)
+                g = grad_data[p1] if grad_data[p1] >= grad_data[p2] else grad_data[p2]
+                if key in edge_accum:
+                    edge_accum[key][0] += g
+                    edge_accum[key][1] += 1
+                else:
+                    edge_accum[key] = [g, 1]
 
     for y in range(height - 1):
         row1 = y * width
         row2 = (y + 1) * width
         for x in range(width):
-            k1 = labels[row1 + x]
-            k2 = labels[row2 + x]
+            p1 = row1 + x
+            p2 = row2 + x
+            k1 = labels[p1]
+            k2 = labels[p2]
             if k1 != k2 and k1 >= 0 and k2 >= 0:
-                sp_neighbors[k1].add(k2)
-                sp_neighbors[k2].add(k1)
+                key = (k1, k2) if k1 < k2 else (k2, k1)
+                g = grad_data[p1] if grad_data[p1] >= grad_data[p2] else grad_data[p2]
+                if key in edge_accum:
+                    edge_accum[key][0] += g
+                    edge_accum[key][1] += 1
+                else:
+                    edge_accum[key] = [g, 1]
+
+    sp_neighbors = [{} for _ in range(num_centers)]
+    for (k1, k2), (g_sum, cnt) in edge_accum.items():
+        avg_g = g_sum / cnt
+        sp_neighbors[k1][k2] = avg_g
+        sp_neighbors[k2][k1] = avg_g
 
     return labels, centers, sp_pixels, sp_neighbors
 
@@ -333,155 +366,331 @@ def cluster_colors(colors_list, k=3, iters=4):
 
 
 # ============================================================================
-# Stage 4 & 5: Hybrid Pipeline Execution with Subpixel Boundary Refinement
+# Stage 4 & 5: Hybrid Pipeline Execution with Narrow-Band Boundary Refinement
 # ============================================================================
+
+def refine_narrow_band(mask, boundary_sp_ids, sp_pixels, fg_clusters, bg_clusters, lab_data, width, height, band_radius=4, iters=2):
+    """
+    Fast narrow-band pixel-level MRF/ICM edge-snapping around the superpixel cut boundary.
+    Uses a sparse dict so zero full-image allocations occur during interactive painting.
+    """
+    if not boundary_sp_ids or not fg_clusters or not bg_clusters:
+        return mask
+
+    band_dist = {}
+    q = deque()
+    for sp_id in boundary_sp_ids:
+        for p in sp_pixels[sp_id]:
+            x = p % width
+            y = p // width
+            if 0 < x < width - 1 and 0 < y < height - 1:
+                v = mask[p]
+                if mask[p - 1] != v or mask[p + 1] != v or mask[p - width] != v or mask[p + width] != v:
+                    if p not in band_dist:
+                        band_dist[p] = 0
+                        q.append(p)
+
+    band_pixels = list(q)
+    while q:
+        p = q.popleft()
+        d = band_dist[p]
+        if d >= band_radius:
+            continue
+        nd = d + 1
+        x = p % width
+        y = p // width
+        if x > 0 and (p - 1) not in band_dist:
+            band_dist[p - 1] = nd
+            q.append(p - 1)
+            band_pixels.append(p - 1)
+        if x < width - 1 and (p + 1) not in band_dist:
+            band_dist[p + 1] = nd
+            q.append(p + 1)
+            band_pixels.append(p + 1)
+        if y > 0 and (p - width) not in band_dist:
+            band_dist[p - width] = nd
+            q.append(p - width)
+            band_pixels.append(p - width)
+        if y < height - 1 and (p + width) not in band_dist:
+            band_dist[p + width] = nd
+            q.append(p + width)
+            band_pixels.append(p + width)
+
+    if not band_pixels:
+        return mask
+
+    data_bias = {}
+    for p in band_pixels:
+        l_idx = p * 3
+        pl, pa, pb = lab_data[l_idx], lab_data[l_idx + 1], lab_data[l_idx + 2]
+        d_fg = min(math.sqrt((pl - k[0])**2 + (pa - k[1])**2 + (pb - k[2])**2) for k in fg_clusters)
+        d_bg = min(math.sqrt((pl - k[0])**2 + (pa - k[1])**2 + (pb - k[2])**2) for k in bg_clusters)
+        data_bias[p] = d_bg - d_fg
+
+    refined = bytearray(mask)
+    smooth_lambda = 12.0
+    inv_sigma2 = 1.0 / 120.0
+
+    for _ in range(iters):
+        for p in band_pixels:
+            x = p % width
+            y = p // width
+            if x == 0 or x == width - 1 or y == 0 or y == height - 1:
+                continue
+            l_idx = p * 3
+            pl, pa, pb = lab_data[l_idx], lab_data[l_idx + 1], lab_data[l_idx + 2]
+
+            fg_neigh_w = 0.0
+            bg_neigh_w = 0.0
+            for q_idx in (p - 1, p + 1, p - width, p + width):
+                ql_idx = q_idx * 3
+                cd2 = (pl - lab_data[ql_idx])**2 + (pa - lab_data[ql_idx + 1])**2 + (pb - lab_data[ql_idx + 2])**2
+                w_pq = smooth_lambda / (1.0 + cd2 * inv_sigma2)
+                if refined[q_idx] == 255:
+                    fg_neigh_w += w_pq
+                else:
+                    bg_neigh_w += w_pq
+
+            score = data_bias[p] + (fg_neigh_w - bg_neigh_w)
+            refined[p] = 255 if score >= 0.0 else 0
+
+    return refined
+
 
 def execute_hybrid_graph_pipeline(
     active_selection,
-    fg_brush_nodes,
+    stroke_seeds,
+    fg_seed_sp,
+    bg_seed_sp,
     sp_centers,
     sp_neighbors,
     sp_pixels,
-    grad_data,
     lab_data,
     width,
     height,
     num_sp,
+    is_subtract=False,
     algorithm_mode="lazy_snapping",
     smoothness_weight=28.0,
     expansion_reach=2.2,
     color_tolerance=28.0,
     hard_bg_cutoff=28.0,
-    contrast_scale=6.0
+    contrast_scale=6.0,
+    edge_barrier=35.0,
+    refine_radius=3,
+    refine_iters=2
 ):
     """
-    Executes the 5-stage hybrid graph cut pipeline:
-    Multi-cluster seeds -> Gradient-weighted graph -> Dinic Min-Cut -> Subpixel edge snapping.
+    Executes the 5-stage hybrid graph cut pipeline for both Add and Subtract modes:
+    Multi-cluster seeds -> Border-gradient graph -> Dinic Min-Cut -> Narrow-band pixel refinement.
     """
-    if not fg_brush_nodes:
+    if not stroke_seeds:
         return active_selection, None
 
-    min_bx = min(sp_centers[b][3] for b in fg_brush_nodes)
-    max_bx = max(sp_centers[b][3] for b in fg_brush_nodes)
-    min_by = min(sp_centers[b][4] for b in fg_brush_nodes)
-    max_by = max(sp_centers[b][4] for b in fg_brush_nodes)
+    min_bx = min(sp_centers[b][3] for b in stroke_seeds)
+    max_bx = max(sp_centers[b][3] for b in stroke_seeds)
+    min_by = min(sp_centers[b][4] for b in stroke_seeds)
+    max_by = max(sp_centers[b][4] for b in stroke_seeds)
 
-    stroke_span = max(25.0, math.hypot(max_bx - min_bx, max_by - min_by))
+    stroke_span = max(30.0, math.hypot(max_bx - min_bx, max_by - min_by))
 
     if algorithm_mode == "contour_lock":
         reach_mult = expansion_reach * 1.1
         smooth_w = smoothness_weight * 1.8
         c_scale = contrast_scale * 0.75
         col_tol = color_tolerance * 0.95
-        k_clusters = 3
+        k_clusters = 4
     elif algorithm_mode == "gradient_soft":
         reach_mult = expansion_reach * 1.3
         smooth_w = smoothness_weight * 0.65
         c_scale = contrast_scale * 1.6
         col_tol = color_tolerance * 1.25
-        k_clusters = 4
+        k_clusters = 5
     elif algorithm_mode == "precision":
         reach_mult = expansion_reach * 0.75
         smooth_w = smoothness_weight * 0.8
         c_scale = contrast_scale * 0.65
         col_tol = color_tolerance * 0.75
-        k_clusters = 2
-    else: # default lazy_snapping
+        k_clusters = 3
+    else:  # default lazy_snapping
         reach_mult = expansion_reach
         smooth_w = smoothness_weight
         c_scale = contrast_scale
         col_tol = color_tolerance
-        k_clusters = 3
+        k_clusters = 4
 
-    search_radius = max(45.0, stroke_span * reach_mult)
+    search_radius = max(65.0, stroke_span * reach_mult)
     sq_search_r = search_radius * search_radius
-    sq_outer_anchor = (search_radius * 0.90) ** 2
+    sq_outer_anchor = (search_radius * 0.88) ** 2
 
-    # 1. Multi-Cluster Seed Extraction
-    fg_colors = [[sp_centers[b][0], sp_centers[b][1], sp_centers[b][2]] for b in fg_brush_nodes]
-    fg_clusters = cluster_colors(fg_colors, k=min(k_clusters, len(fg_colors)))
+    bx0 = min_bx - search_radius
+    bx1 = max_bx + search_radius
+    by0 = min_by - search_radius
+    by1 = max_by + search_radius
+
+    # Subsample stroke points if very dense so ROI distance check stays O(1) per node
+    seed_list = list(stroke_seeds)
+    step_s = max(1, len(seed_list) // 18)
+    seed_pts = [(sp_centers[seed_list[i]][3], sp_centers[seed_list[i]][4]) for i in range(0, len(seed_list), step_s)]
 
     candidate_nodes = set()
-    hard_bg_nodes = set()
-    bg_colors = []
-
     for sp_id in range(num_sp):
+        if sp_id in stroke_seeds:
+            candidate_nodes.add(sp_id)
+            continue
         cx, cy = sp_centers[sp_id][3], sp_centers[sp_id][4]
-        min_d2 = min((cx - sp_centers[b][3])**2 + (cy - sp_centers[b][4])**2 for b in fg_brush_nodes)
+        if cx < bx0 or cx > bx1 or cy < by0 or cy > by1:
+            continue
+        min_d2 = min((cx - sx)**2 + (cy - sy)**2 for sx, sy in seed_pts)
         if min_d2 <= sq_search_r:
             candidate_nodes.add(sp_id)
-            c = [sp_centers[sp_id][0], sp_centers[sp_id][1], sp_centers[sp_id][2]]
-            min_fg_dist = min(math.sqrt((c[0]-k[0])**2 + (c[1]-k[1])**2 + (c[2]-k[2])**2) for k in fg_clusters)
-            if min_d2 >= sq_outer_anchor or min_fg_dist >= col_tol * 1.5:
-                hard_bg_nodes.add(sp_id)
-                bg_colors.append(c)
 
     if not candidate_nodes:
         return active_selection, None
 
-    bg_clusters = cluster_colors(bg_colors, k=min(k_clusters, max(1, len(bg_colors))))
+    hard_fg_nodes = set()
+    hard_bg_nodes = set()
+    fg_colors = []
+    bg_colors = []
+
+    if is_subtract:
+        # Subtract mode: stroke_seeds are hard BG; nearby selected nodes outside stroke are FG anchors
+        hard_bg_nodes.update(stroke_seeds)
+        for b in stroke_seeds:
+            bg_colors.append([sp_centers[b][0], sp_centers[b][1], sp_centers[b][2]])
+        bg_clusters = cluster_colors(bg_colors, k=min(k_clusters, len(bg_colors)))
+
+        for sp_id in candidate_nodes:
+            if sp_id in hard_bg_nodes:
+                continue
+            c = [sp_centers[sp_id][0], sp_centers[sp_id][1], sp_centers[sp_id][2]]
+            if sp_id in active_selection:
+                min_bg_dist = min(math.sqrt((c[0]-k[0])**2 + (c[1]-k[1])**2 + (c[2]-k[2])**2) for k in bg_clusters)
+                if sp_id in fg_seed_sp or min_bg_dist >= col_tol * 0.9:
+                    hard_fg_nodes.add(sp_id)
+                    fg_colors.append(c)
+            else:
+                hard_bg_nodes.add(sp_id)
+                bg_colors.append(c)
+
+        if not fg_colors:
+            # Everything nearby matches subtracted color -> just remove stroke_seeds
+            new_selected_sp = set(active_selection) - stroke_seeds
+            mask = bytearray(width * height)
+            for sp_id in new_selected_sp:
+                for p_idx in sp_pixels[sp_id]:
+                    mask[p_idx] = 255
+            return new_selected_sp, mask
+
+        fg_clusters = cluster_colors(fg_colors, k=min(k_clusters, len(fg_colors)))
+        bg_clusters = cluster_colors(bg_colors, k=min(k_clusters, len(bg_colors)))
+    else:
+        # Add mode: stroke_seeds are hard FG
+        hard_fg_nodes.update(stroke_seeds)
+        for b in stroke_seeds:
+            fg_colors.append([sp_centers[b][0], sp_centers[b][1], sp_centers[b][2]])
+        fg_clusters = cluster_colors(fg_colors, k=min(k_clusters, len(fg_colors)))
+
+        for b in bg_seed_sp:
+            if b in candidate_nodes and b not in hard_fg_nodes:
+                hard_bg_nodes.add(b)
+            bg_colors.append([sp_centers[b][0], sp_centers[b][1], sp_centers[b][2]])
+
+        for sp_id in candidate_nodes:
+            if sp_id in hard_fg_nodes or sp_id in hard_bg_nodes:
+                continue
+            if sp_id in active_selection:
+                continue
+            cx, cy = sp_centers[sp_id][3], sp_centers[sp_id][4]
+            min_d2 = min((cx - sx)**2 + (cy - sy)**2 for sx, sy in seed_pts)
+            c = [sp_centers[sp_id][0], sp_centers[sp_id][1], sp_centers[sp_id][2]]
+            min_fg_dist = min(math.sqrt((c[0]-k[0])**2 + (c[1]-k[1])**2 + (c[2]-k[2])**2) for k in fg_clusters)
+            if min_fg_dist >= hard_bg_cutoff:
+                hard_bg_nodes.add(sp_id)
+                bg_colors.append(c)
+            elif min_d2 >= sq_outer_anchor and min_fg_dist >= col_tol * 0.85:
+                bg_colors.append(c)
+
+    has_bg_model = len(bg_colors) > 0
+    if has_bg_model and not is_subtract:
+        bg_clusters = cluster_colors(bg_colors, k=min(k_clusters, len(bg_colors)))
+    elif not has_bg_model:
+        bg_clusters = []
 
     cand_list = list(candidate_nodes)
     node_to_local = {cand_list[i]: i for i in range(len(cand_list))}
-    local_N = len(cand_list)
-    mf = DinicMaxFlow(local_N)
+    mf = DinicMaxFlow(len(cand_list))
 
-    # 2. Regional Data Potentials
     for global_id, local_id in node_to_local.items():
-        if global_id in fg_brush_nodes:
+        if global_id in hard_fg_nodes:
             mf.add_tlinks(local_id, 100000.0, 0.0)
         elif global_id in hard_bg_nodes:
             mf.add_tlinks(local_id, 0.0, 100000.0)
+        elif global_id in active_selection and not is_subtract:
+            mf.add_tlinks(local_id, 28.0, 0.0)
         else:
             c = [sp_centers[global_id][0], sp_centers[global_id][1], sp_centers[global_id][2]]
             d_fg = min(math.sqrt((c[0]-k[0])**2 + (c[1]-k[1])**2 + (c[2]-k[2])**2) for k in fg_clusters)
-            d_bg = min(math.sqrt((c[0]-k[0])**2 + (c[1]-k[1])**2 + (c[2]-k[2])**2) for k in bg_clusters)
-            eps = 0.001
-            e_fg = d_fg / (d_fg + d_bg + eps)
-            e_bg = d_bg / (d_fg + d_bg + eps)
-            mf.add_tlinks(local_id, (1.0 - e_fg) * 35.0, (1.0 - e_bg) * 35.0)
+            if has_bg_model:
+                d_bg = min(math.sqrt((c[0]-k[0])**2 + (c[1]-k[1])**2 + (c[2]-k[2])**2) for k in bg_clusters)
+                eps = 0.001
+                e_fg = d_fg / (d_fg + d_bg + eps)
+                e_bg = d_bg / (d_fg + d_bg + eps)
+                mf.add_tlinks(local_id, (1.0 - e_fg) * 35.0, (1.0 - e_bg) * 35.0)
+            else:
+                if d_fg < col_tol:
+                    mf.add_tlinks(local_id, 22.0, 0.0)
+                else:
+                    mf.add_tlinks(local_id, 0.0, 22.0)
 
-    # 3. Multi-Feature Edge-Aware Connections: Spatial * Color Similarity * Gradient Edge Barrier
+    barrier_scale = max(4.0, 50.0 - edge_barrier * 0.8)
     for u_global, u_local in node_to_local.items():
         ul, ua, ub = sp_centers[u_global][0], sp_centers[u_global][1], sp_centers[u_global][2]
-        for v_global in sp_neighbors[u_global]:
+        for v_global, border_grad in sp_neighbors[u_global].items():
             if v_global in node_to_local and u_global < v_global:
                 v_local = node_to_local[v_global]
                 vl, va, vb = sp_centers[v_global][0], sp_centers[v_global][1], sp_centers[v_global][2]
                 color_dist = math.sqrt((ul-vl)**2 + (ua-va)**2 + (ub-vb)**2)
-                edge_strength = (sp_centers[u_global][5] + sp_centers[v_global][5]) * 0.5
-                edge_penalty = 1.0 / (1.0 + (edge_strength / 12.0)**2)
+                edge_penalty = 1.0 / (1.0 + (border_grad / barrier_scale)**2)
                 w_smooth = (smooth_w / (1.0 + (color_dist / max(1.0, c_scale))**2)) * edge_penalty
                 mf.add_nlink(u_local, v_local, w_smooth)
 
-    # 4. Dinic Min-Cut Global Optimization
     fg_local_set = mf.compute_min_cut()
-    new_selected_sp = set(active_selection)
-    for u_local in fg_local_set:
-        new_selected_sp.add(cand_list[u_local])
+    fg_cand_globals = set(cand_list[u_local] for u_local in fg_local_set)
 
-    # 5. Pixel Mask Assembly & Boundary Refinement (Subpixel edge snapping)
+    if is_subtract:
+        # Remove any candidate node that did NOT stay in FG
+        new_selected_sp = (set(active_selection) - candidate_nodes) | (fg_cand_globals & set(active_selection))
+    else:
+        new_selected_sp = set(active_selection) | fg_cand_globals
+
     mask = bytearray(width * height)
     for sp_id in new_selected_sp:
         for p_idx in sp_pixels[sp_id]:
             mask[p_idx] = 255
 
-    refined_mask = bytearray(mask)
-    for y in range(1, height - 1):
-        row = y * width
-        for x in range(1, width - 1):
-            p = row + x
-            val = mask[p]
-            if (mask[p - 1] != val or mask[p + 1] != val or mask[p - width] != val or mask[p + width] != val):
-                pl, pa, pb = lab_data[p*3], lab_data[p*3+1], lab_data[p*3+2]
-                d_fg = min(math.sqrt((pl-k[0])**2 + (pa-k[1])**2 + (pb-k[2])**2) for k in fg_clusters)
-                d_bg = min(math.sqrt((pl-k[0])**2 + (pa-k[1])**2 + (pb-k[2])**2) for k in bg_clusters)
-                if val == 255:
-                    if d_bg < d_fg:
-                        refined_mask[p] = 0
-                else:
-                    if d_fg < d_bg - 8.0 and grad_data[p] < 25.0:
-                        refined_mask[p] = 255
+    if has_bg_model and refine_radius > 0:
+        # Build local FG color model including previously selected nodes in the ROI so we never erode other object parts
+        local_fg_colors = list(fg_colors)
+        for sp_id in (new_selected_sp & candidate_nodes):
+            if sp_id not in stroke_seeds:
+                local_fg_colors.append([sp_centers[sp_id][0], sp_centers[sp_id][1], sp_centers[sp_id][2]])
+        local_fg_clusters = cluster_colors(local_fg_colors, k=min(5, len(local_fg_colors)))
+
+        boundary_sp = set()
+        for sp_id in candidate_nodes:
+            if sp_id in new_selected_sp:
+                for nb in sp_neighbors[sp_id]:
+                    if nb not in new_selected_sp:
+                        boundary_sp.add(sp_id)
+                        break
+
+        refined_mask = refine_narrow_band(
+            mask, boundary_sp, sp_pixels, local_fg_clusters, bg_clusters,
+            lab_data, width, height, band_radius=refine_radius, iters=refine_iters
+        )
+    else:
+        refined_mask = mask
 
     return new_selected_sp, refined_mask
 
@@ -531,7 +740,7 @@ class QuickSelectionDialog(Gtk.Dialog):
         self.hard_bg_cutoff = 28.0
         self.smoothness_weight = 28.0
         self.contrast_scale = 6.0
-        self.slic_compactness = 16.0
+        self.slic_compactness = 8.0
 
         # Selection Overlay Color (Default Cyan 50% opacity)
         self.overlay_r = 0.0
@@ -539,8 +748,10 @@ class QuickSelectionDialog(Gtk.Dialog):
         self.overlay_b = 1.0
         self.overlay_a = 0.50
 
-        # Selected supernodes set
+        # Selected supernodes & persistent FG/BG seeds
         self.selected_superpixels = set()
+        self.fg_seed_sp = set()
+        self.bg_seed_sp = set()
 
         # History stack for Undo
         self.history_stack = []
@@ -599,9 +810,9 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         self.thumb_grad = compute_multichannel_gradient(self.thumb_lab, self.prev_w, self.prev_h)
 
-        # 4. Fine SLIC Superpixels Preprocessing (~1500 nodes)
+        # 4. Edge-Aware SLIC Superpixels Preprocessing (~2400 nodes)
         self.sp_labels, self.sp_centers, self.sp_pixels, self.sp_neighbors = compute_slic(
-            self.thumb_lab, self.thumb_grad, self.prev_w, self.prev_h, num_superpixels=1500, compactness=self.slic_compactness, num_iters=3
+            self.thumb_lab, self.thumb_grad, self.prev_w, self.prev_h, num_superpixels=2400, compactness=self.slic_compactness, num_iters=3
         )
         self.num_sp = len(self.sp_centers)
 
@@ -612,7 +823,12 @@ class QuickSelectionDialog(Gtk.Dialog):
                 if sel_count >= len(sp_px_list) // 2:
                     self.selected_superpixels.add(sp_id)
 
-        self.history_stack.append(bytearray(self.thumb_mask))
+        self.history_stack.append((
+            bytearray(self.thumb_mask),
+            set(self.selected_superpixels),
+            set(self.fg_seed_sp),
+            set(self.bg_seed_sp),
+        ))
 
     def _build_ui(self):
         self.add_button(_("Cancel"), Gtk.ResponseType.CANCEL)
@@ -1133,13 +1349,20 @@ class QuickSelectionDialog(Gtk.Dialog):
             self.last_img_y = img_y
             self.current_stroke_seeds.clear()
 
-            self.history_stack.append(bytearray(self.thumb_mask))
+            self.history_stack.append((
+                bytearray(self.thumb_mask),
+                set(self.selected_superpixels),
+                set(self.fg_seed_sp),
+                set(self.bg_seed_sp),
+            ))
             if len(self.history_stack) > 25:
                 self.history_stack.pop(0)
 
             if self.selection_mode == "replace":
                 self.thumb_mask = bytearray(self.prev_w * self.prev_h)
                 self.selected_superpixels.clear()
+                self.fg_seed_sp.clear()
+                self.bg_seed_sp.clear()
                 self.selection_mode = "add"
                 self.btn_mode_add.set_active(True)
                 self._refresh_full_preview()
@@ -1182,6 +1405,8 @@ class QuickSelectionDialog(Gtk.Dialog):
 
         elif event.button == 1:
             self.is_painting = False
+            if self.current_stroke_seeds:
+                self._run_pipeline_for_seeds(refine_radius=5, refine_iters=3)
             self.current_stroke_seeds.clear()
             self._update_status()
             self._refresh_full_preview()
@@ -1191,12 +1416,46 @@ class QuickSelectionDialog(Gtk.Dialog):
         self.cursor_screen_y = -100
         self.drawing_area.queue_draw()
 
+    def _run_pipeline_for_seeds(self, refine_radius=3, refine_iters=2):
+        is_sub = (self.selection_mode == "subtract")
+        if is_sub:
+            self.bg_seed_sp.update(self.current_stroke_seeds)
+            self.fg_seed_sp.difference_update(self.current_stroke_seeds)
+        else:
+            self.fg_seed_sp.update(self.current_stroke_seeds)
+            self.bg_seed_sp.difference_update(self.current_stroke_seeds)
+
+        self.selected_superpixels, refined_mask = execute_hybrid_graph_pipeline(
+            self.selected_superpixels,
+            self.current_stroke_seeds,
+            self.fg_seed_sp,
+            self.bg_seed_sp,
+            self.sp_centers,
+            self.sp_neighbors,
+            self.sp_pixels,
+            self.thumb_lab,
+            self.prev_w,
+            self.prev_h,
+            self.num_sp,
+            is_subtract=is_sub,
+            algorithm_mode=self.active_algorithm,
+            smoothness_weight=self.smoothness_weight,
+            expansion_reach=self.snap_reach,
+            color_tolerance=self.color_tolerance,
+            hard_bg_cutoff=self.hard_bg_cutoff,
+            contrast_scale=self.contrast_scale,
+            edge_barrier=self.edge_barrier,
+            refine_radius=refine_radius,
+            refine_iters=refine_iters
+        )
+        if refined_mask is not None:
+            self.thumb_mask = refined_mask
+
     def _paint_stroke_step(self, px, py):
-        """Executes the 5-stage Hybrid Graph Cut engine at (px, py) in <0.005s."""
+        """Executes the 5-stage Hybrid Graph Cut engine at (px, py)."""
         try:
             px = max(0, min(self.prev_w - 1, px))
             py = max(0, min(self.prev_h - 1, py))
-            is_sub = (self.selection_mode == "subtract")
 
             sq_r = self.brush_size * self.brush_size
             for sp_id in range(self.num_sp):
@@ -1204,35 +1463,7 @@ class QuickSelectionDialog(Gtk.Dialog):
                 if (cx - px)**2 + (cy - py)**2 <= sq_r:
                     self.current_stroke_seeds.add(sp_id)
 
-            if is_sub:
-                for s in self.current_stroke_seeds:
-                    self.selected_superpixels.discard(s)
-                self.thumb_mask = bytearray(self.prev_w * self.prev_h)
-                for sp_id in self.selected_superpixels:
-                    for p_idx in self.sp_pixels[sp_id]:
-                        self.thumb_mask[p_idx] = 255
-            else:
-                self.selected_superpixels, refined_mask = execute_hybrid_graph_pipeline(
-                    self.selected_superpixels,
-                    self.current_stroke_seeds,
-                    self.sp_centers,
-                    self.sp_neighbors,
-                    self.sp_pixels,
-                    self.thumb_grad,
-                    self.thumb_lab,
-                    self.prev_w,
-                    self.prev_h,
-                    self.num_sp,
-                    algorithm_mode=self.active_algorithm,
-                    smoothness_weight=self.smoothness_weight,
-                    expansion_reach=self.snap_reach,
-                    color_tolerance=self.color_tolerance,
-                    hard_bg_cutoff=self.hard_bg_cutoff,
-                    contrast_scale=self.contrast_scale
-                )
-                if refined_mask:
-                    self.thumb_mask = refined_mask
-
+            self._run_pipeline_for_seeds(refine_radius=3, refine_iters=2)
             self._refresh_full_preview()
 
         except Exception:
@@ -1252,13 +1483,24 @@ class QuickSelectionDialog(Gtk.Dialog):
     def _on_undo_clicked(self, btn):
         if len(self.history_stack) > 1:
             self.history_stack.pop()
-            self.thumb_mask = bytearray(self.history_stack[-1])
+            prev_mask, prev_sp, prev_fg, prev_bg = self.history_stack[-1]
+            self.thumb_mask = bytearray(prev_mask)
+            self.selected_superpixels = set(prev_sp)
+            self.fg_seed_sp = set(prev_fg)
+            self.bg_seed_sp = set(prev_bg)
             self._refresh_full_preview()
 
     def _on_clear_clicked(self, btn):
-        self.history_stack.append(bytearray(self.thumb_mask))
+        self.history_stack.append((
+            bytearray(self.thumb_mask),
+            set(self.selected_superpixels),
+            set(self.fg_seed_sp),
+            set(self.bg_seed_sp),
+        ))
         self.thumb_mask = bytearray(self.prev_w * self.prev_h)
         self.selected_superpixels.clear()
+        self.fg_seed_sp.clear()
+        self.bg_seed_sp.clear()
         self._refresh_full_preview()
 
     def _on_draw_canvas(self, widget, cr):
@@ -1302,7 +1544,7 @@ class QuickSelectionDialog(Gtk.Dialog):
                 cr.line_to(self.cursor_screen_x + 4, self.cursor_screen_y)
                 if self.selection_mode != "subtract":
                     cr.move_to(self.cursor_screen_x, self.cursor_screen_y - 4)
-                    cr.line_to(self.cursor_screen_y + 4)
+                    cr.line_to(self.cursor_screen_x, self.cursor_screen_y + 4)
                 cr.stroke()
                 cr.restore()
 
@@ -1320,24 +1562,40 @@ class QuickSelectionDialog(Gtk.Dialog):
         orig_h = self.orig_height
         thumb_w = self.prev_w
         thumb_h = self.prev_h
-        thumb_mask = self.thumb_mask
 
-        x_map = [min(thumb_w - 1, int(x * thumb_w / orig_w)) for x in range(orig_w)]
+        if orig_w == thumb_w and orig_h == thumb_h:
+            full_mask_bytes = bytes(self.thumb_mask)
+        else:
+            # Fast C-accelerated bilinear upscaling for smooth anti-aliased selection edges
+            rgb_mask = bytearray(thumb_w * thumb_h * 3)
+            for i, val in enumerate(self.thumb_mask):
+                if val:
+                    j = i * 3
+                    rgb_mask[j] = val
+                    rgb_mask[j + 1] = val
+                    rgb_mask[j + 2] = val
 
-        expanded_rows = []
-        for ty in range(thumb_h):
-            t_row_start = ty * thumb_w
-            row_bytes = bytearray(orig_w)
-            for x, tx in enumerate(x_map):
-                row_bytes[x] = thumb_mask[t_row_start + tx]
-            expanded_rows.append(bytes(row_bytes))
+            src_pb = GdkPixbuf.Pixbuf.new_from_bytes(
+                GLib.Bytes.new(bytes(rgb_mask)),
+                GdkPixbuf.Colorspace.RGB,
+                False,
+                8,
+                thumb_w,
+                thumb_h,
+                thumb_w * 3
+            )
+            dst_pb = src_pb.scale_simple(orig_w, orig_h, GdkPixbuf.InterpType.BILINEAR)
+            dst_pixels = dst_pb.get_pixels()
+            rowstride = dst_pb.get_rowstride()
 
-        full_mask_chunks = []
-        for y in range(orig_h):
-            ty = min(thumb_h - 1, int(y * thumb_h / orig_h))
-            full_mask_chunks.append(expanded_rows[ty])
-
-        full_mask_bytes = b"".join(full_mask_chunks)
+            if rowstride == orig_w * 3:
+                full_mask_bytes = bytes(dst_pixels[0::3])
+            else:
+                chunks = []
+                for y in range(orig_h):
+                    row_start = y * rowstride
+                    chunks.append(dst_pixels[row_start : row_start + orig_w * 3 : 3])
+                full_mask_bytes = b"".join(chunks)
 
         sel_buf.set(rect_full, "Y u8", full_mask_bytes)
         selection.update(0, 0, orig_w, orig_h)
